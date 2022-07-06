@@ -1585,6 +1585,8 @@ static ncclResult_t ofi_getProperties(int dev, ncclNetProperties_t *props)
 
 	/* Speed reported in Mbps */
 	dev_props.speed = nic_info->link_attr->speed / (1e6);
+	/* Temporary workaround to Slingshot provider link speed bug */
+	if (dev_props.speed < 1000) dev_props.speed *= 1000;
 
 	goto exit;
 
