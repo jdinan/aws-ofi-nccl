@@ -57,6 +57,19 @@ AC_ARG_WITH([mpi],
              LDFLAGS="-L$withval/$mpi_libdir $LDFLAGS"],
             [])
 
+AC_ARG_WITH([gdrcopy],
+            AC_HELP_STRING([--with-gdrcopy=PATH], [Path to non-standard GDRCopy installation]),
+            [AS_IF([test "$withval" = "yes"], [],
+                   [AS_IF([test -d $withval/lib64], [gdrcopy_libdir="lib64"], [gdrcopy_libdir="lib"])
+                    CFLAGS="-I$withval/include $CFLAGS"
+                    LDFLAGS="-L$withval/$gdrcopy_libdir $LDFLAGS"])
+             AC_DEFINE([HAVE_GDRCOPY], [1], [Build support for GDRCopy])
+             AC_CHECK_HEADERS([gdrapi.h], [], [AC_MSG_ERROR([unable to find GDRCopy headers])])
+             AC_CHECK_LIB([gdrapi], [gdr_open], [], [AC_MSG_ERROR([GDRCopy library not found])])],
+            [])
+
+AM_CONDITIONAL([HAVE_GDRCOPY], [test "x$with_gdrcopy" != "x"])
+
 AC_ARG_ENABLE([tests], [AS_HELP_STRING([--disable-tests],
       [Disable build of test binaries])], [enable_tests], [])
 AM_CONDITIONAL([ENABLE_TESTS], [test "x$enable_tests" != "xno"])
