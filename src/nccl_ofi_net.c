@@ -13,6 +13,13 @@
 #include <sys/mman.h>
 #include <stack.h>
 #include <nccl_ofi_param.h>
+#include <nccl_ofi_mem.h>
+#include <gdrapi.h>
+
+/* NCCL OFI lock for concurrency */
+pthread_mutex_t nccl_ofi_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Logger Function */
+ncclDebugLogger_t ofi_log_function = NULL;
 
 static uint32_t libversion = 0;
 /* NICs info list for a provider */
@@ -31,6 +38,8 @@ bool support_gdr = true;
  * to flush data to the GPU. Note, CUDA flush support is not supported on all
  * platforms and should be disabled by default */
 bool cuda_flush = false;
+
+gdr_t gdr_desc = NULL;
 
 /*
  * @brief	Allocates free list for NCCL OFI requests
@@ -702,6 +711,107 @@ static struct fi_info *get_nic_info(int dev, struct fi_info *nic_info_list)
 	return nic_info;
 }
 
+static ssize_t copy_from_hmem(void *dest, size_t size, enum fi_hmem_iface iface,
+		uint64_t device, const struct iovec *hmem_iov,
+		size_t hmem_iov_count, uint64_t hmem_iov_offset)
+{
+	char *dest_ptr = (char*) dest;
+	ssize_t size_cpy = 0;
+	int ret;
+
+	assert(hmem_iov_offset < hmem_iov_count);
+
+	for (size_t i = hmem_iov_offset; i < hmem_iov_count; i++) {
+		if (size_cpy + hmem_iov[i].iov_len > size)
+			break;
+
+		switch (iface) {
+			case FI_HMEM_CUDA:
+				nccl_ofi_gdr_buf_handle_t *buf_hdl =
+					nccl_ofi_get_registered_buffer_handle(hmem_iov[i].iov_base, hmem_iov[i].iov_len);
+
+				if (NULL == buf_hdl) {
+					NCCL_OFI_WARN("Could not locate GDRCopy registration for 0x%p len=%zu",
+							hmem_iov[i].iov_base, hmem_iov[i].iov_len);
+					size_cpy = -FI_EOTHER;
+					goto out;
+				}
+
+				ptrdiff_t offset = (uint64_t)hmem_iov[i].iov_base - buf_hdl->info.va;
+				ret = gdr_copy_from_mapping(buf_hdl->mhandle, dest_ptr,
+						(char *)buf_hdl->base_ptr + offset, hmem_iov[i].iov_len);
+				if (ret) {
+					NCCL_OFI_WARN("Error in gdr_copy_from_mapping (%d)", ret);
+					size_cpy = -FI_EOTHER;
+					goto out;
+				}
+				break;
+			case FI_HMEM_SYSTEM:
+				memcpy(dest_ptr, hmem_iov[i].iov_base, hmem_iov[i].iov_len);
+				break;
+			default:
+				return -FI_EINVAL;
+		}
+
+		dest_ptr += hmem_iov[i].iov_len;
+		size_cpy += hmem_iov[i].iov_len;
+	}
+
+out:
+	return size_cpy;
+}
+
+static ssize_t copy_to_hmem(enum fi_hmem_iface iface, uint64_t device,
+		const struct iovec *hmem_iov, size_t hmem_iov_count,
+		uint64_t hmem_iov_offset, const void *src, size_t size)
+{
+	char *src_ptr = (char*) src;
+	ssize_t size_cpy = 0;
+	int ret;
+
+	assert(hmem_iov_offset < hmem_iov_count);
+
+	for (size_t i = hmem_iov_offset; i < hmem_iov_count; i++) {
+		if (size_cpy + hmem_iov[i].iov_len > size)
+			break;
+
+		switch (iface) {
+			case FI_HMEM_CUDA:
+				nccl_ofi_gdr_buf_handle_t *buf_hdl =
+					nccl_ofi_get_registered_buffer_handle(hmem_iov[i].iov_base, hmem_iov[i].iov_len);
+
+				if (NULL == buf_hdl) {
+					NCCL_OFI_WARN("Could not locate GDRCopy registration for 0x%p len=%zu",
+							hmem_iov[i].iov_base, hmem_iov[i].iov_len);
+					size_cpy = -FI_EOTHER;
+					goto out;
+				}
+
+				ptrdiff_t offset = (uint64_t)hmem_iov[i].iov_base - buf_hdl->info.va;
+				ret = gdr_copy_to_mapping(buf_hdl->mhandle,
+						(char *)buf_hdl->base_ptr + offset, src_ptr, hmem_iov[i].iov_len);
+				if (ret) {
+					NCCL_OFI_WARN("Error in gdr_copy_to_mapping (%d)", ret);
+					size_cpy = -FI_EOTHER;
+					goto out;
+				}
+				break;
+			case FI_HMEM_SYSTEM:
+				memcpy(hmem_iov[i].iov_base, src_ptr, hmem_iov[i].iov_len);
+				break;
+			default:
+				return -FI_EINVAL;
+		}
+
+		src_ptr  += hmem_iov[i].iov_len;
+		size_cpy += hmem_iov[i].iov_len;
+	}
+
+out:
+	return size_cpy;
+}
+
+
 /*
  * @brief	Allocates and initialises various libfabric resources like
  *		fabric, domain, endpoint, CQ and AV.
@@ -751,6 +861,30 @@ static ncclResult_t create_nccl_ofi_component(struct fi_info *prov,
 	if (OFI_UNLIKELY(ret != 0)) {
 		NCCL_OFI_WARN("Couldn't open a fabric access domain. RC: %d, ERROR: %s",
 			     ret, fi_strerror(-ret));
+		ret = ncclSystemError;
+		goto error;
+	}
+
+	struct fi_hmem_override_ops hmem_ops;
+
+	hmem_ops.size = sizeof(struct fi_hmem_override_ops);
+	hmem_ops.copy_from_hmem_iov = copy_from_hmem;
+	hmem_ops.copy_to_hmem_iov   = copy_to_hmem;
+
+	ret = fi_set_ops(&(nccl_ofi_comp->domain->fid),
+			FI_SET_OPS_HMEM_OVERRIDE,
+			0, &hmem_ops, NULL);
+
+	if (OFI_UNLIKELY(ret != 0)) {
+		NCCL_OFI_WARN("Couldn't override HMEM ops. RC: %d, ERROR: %s",
+			     ret, fi_strerror(-ret));
+		ret = ncclSystemError;
+		goto error;
+	}
+
+	gdr_desc = gdr_open();
+	if (!gdr_desc) {
+		NCCL_OFI_WARN("GDRCopy initialization failed.");
 		ret = ncclSystemError;
 		goto error;
 	}
@@ -819,6 +953,8 @@ error:
 		fi_close((fid_t)nccl_ofi_comp->av);
 	if (nccl_ofi_comp->cq)
 		fi_close((fid_t)nccl_ofi_comp->cq);
+        if (gdr_desc)
+            gdr_close(gdr_desc);
 exit:
 	return ret;
 }
@@ -884,6 +1020,8 @@ void release_nccl_ofi_component(int dev)
 		fi_close((fid_t)nccl_ofi_comp->domain);
 	if (nccl_ofi_comp->fabric)
 		fi_close((fid_t)nccl_ofi_comp->fabric);
+	if (gdr_desc)
+		gdr_close(gdr_desc);
 
 	free(nccl_ofi_comp);
 	nccl_ofi_component[dev] = NULL;
@@ -2428,7 +2566,7 @@ exit:
 static ncclResult_t ofi_regMr(void *comm, void *data, int size, int type,
 			      void **mhandle)
 {
-	struct fid_mr *mr_handle = NULL;
+	nccl_ofi_mr_handle_t *mr_handle = NULL;
 	ncclResult_t ret = ncclSuccess;
 
 	ofiComm_t *ofi_comm = (ofiComm_t *)comm;
@@ -2447,7 +2585,38 @@ static ncclResult_t ofi_regMr(void *comm, void *data, int size, int type,
 		goto exit;
 	}
 
-	ret = register_mr_buffers(ofi_comm, data, size, type, &mr_handle);
+	mr_handle = malloc(sizeof(nccl_ofi_mr_handle_t));
+	if (mr_handle == NULL) {
+		NCCL_OFI_WARN("Unable to allocate MR handle");
+		ret = ncclSystemError;
+		goto exit;
+	}
+	mr_handle->addr = data;
+	mr_handle->size = size;
+	mr_handle->type = type;
+	mr_handle->mr_handle = NULL;
+
+	ret = register_mr_buffers(ofi_comm, data, size, type, &mr_handle->mr_handle);
+
+	if (ret) {
+		NCCL_OFI_WARN("register_mr_buffers failed (%d)", ret);
+		ret = ncclSystemError;
+		goto exit;
+	}
+
+	if (type == NCCL_PTR_CUDA) {
+		ret = nccl_ofi_buffer_register(data, size);
+		if (ret) {
+			NCCL_OFI_WARN("nccl_ofi_buffer_register failed (%d)", ret);
+			ret = ncclSystemError;
+			goto exit;
+		}
+	}
+	/* No OFI registration and no GDR registration */
+	else if (mr_handle->mr_handle == NULL) {
+		free(mr_handle);
+		mr_handle = NULL;
+	}
 
 exit:
 	*mhandle = (void *)mr_handle;
@@ -2458,7 +2627,7 @@ static ncclResult_t ofi_deregMr(void *comm, void *mhandle)
 {
 	ncclResult_t ret = ncclSuccess;
 	int rc;
-	struct fid_mr *mr_handle = (struct fid_mr *)mhandle;
+	nccl_ofi_mr_handle_t *mr_handle = (nccl_ofi_mr_handle_t *)mhandle;
 
 	/* Validate Comm */
 	if (OFI_UNLIKELY(comm == NULL)) {
@@ -2472,12 +2641,27 @@ static ncclResult_t ofi_deregMr(void *comm, void *mhandle)
 		goto exit;
 	}
 
-	rc = fi_close((fid_t)mr_handle);
-	if (OFI_UNLIKELY(rc != 0)) {
-		ret = ncclSystemError;
-		NCCL_OFI_WARN("Unable to de-register memory. RC: %d, Error: %s",
-			      fi_strerror(-rc));
+	if (OFI_LIKELY(mr_handle->mr_handle != NULL)) {
+		rc = fi_close((struct fid*)mr_handle->mr_handle);
+		if (OFI_UNLIKELY(rc != 0)) {
+			ret = ncclSystemError;
+			NCCL_OFI_WARN("Unable to de-register memory. RC: %d, Error: %s",
+				      fi_strerror(-rc));
+		}
+	} else {
+		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Null MR handle provided. Skipping deregisteration.");
+        }
+
+	if (mr_handle->type == NCCL_PTR_CUDA) {
+		ret = nccl_ofi_buffer_unregister(mr_handle->addr);
+		if (ret) {
+			NCCL_OFI_WARN("nccl_ofi_buffer_register failed (%d)", ret);
+			ret = ncclSystemError;
+			goto exit;
+		}
 	}
+
+	free(mr_handle);
 
 exit:
 	return ret;
@@ -2544,8 +2728,8 @@ static ncclResult_t ofi_isend(void *sendComm, void* data, int size,
 	if (OFI_UNLIKELY(ret != 0))
 		goto error;
 
-	if (mhandle != NULL)
-		desc = fi_mr_desc(mhandle);
+	if (mhandle != NULL && ((nccl_ofi_mr_handle_t*)mhandle)->mr_handle != NULL)
+		desc = fi_mr_desc(((nccl_ofi_mr_handle_t*)mhandle)->mr_handle);
 	/*
 	 * Try sending data to remote EP; Return NULL request
 	 * if not able to send.
@@ -2636,10 +2820,11 @@ static ncclResult_t ofi_irecv(void* recvComm, void* buffer, int size,
 	/* Currently, plugin doesn't support grouped receives */
 	assert(n == 1);
 	for (int recv_n = 0; recv_n < n; recv_n++) {
+		nccl_ofi_mr_handle_t **mr_handles = (nccl_ofi_mr_handle_t**) mhandles;
 		void *desc = NULL;
 
-		if (mhandles[recv_n] != NULL) {
-			desc = fi_mr_desc(mhandles[recv_n]);
+		if (mr_handles[recv_n]->mr_handle != NULL) {
+			desc = fi_mr_desc(mr_handles[recv_n]->mr_handle);
 		}
 
 		/*
@@ -2665,8 +2850,8 @@ static ncclResult_t ofi_irecv(void* recvComm, void* buffer, int size,
 	}
 #else
 	void *desc = NULL;
-	if (mhandle != NULL)
-		desc = fi_mr_desc(mhandle);
+	if (mhandle != NULL && ((nccl_ofi_mr_handle_t*)mhandle)->mr_handle != NULL)
+		desc = fi_mr_desc(((nccl_ofi_mr_handle_t*)mhandle)->mr_handle);
 
 	/* Try posting buffer to local EP */
 	rc = fi_trecv(rComm->local_ep, buffer, size,
@@ -2811,8 +2996,9 @@ static ncclResult_t ofi_iflush(void* recvComm, void* buffer, int size,
 		goto exit;
 	}
 
-	if (mhandles && mhandles[flush_n])
-		mr_handle = (struct fid_mr *)mhandles[flush_n];
+	nccl_ofi_mr_handle_t **mr_handles = (nccl_ofi_mr_handle_t**) mhandles;
+	if (mr_handles && mr_handles[flush_n]->mr_handle)
+		mr_handle = mr_handles[flush_n]->mr_handle;
 
 	data = buffers[flush_n];
 #else
@@ -2825,7 +3011,7 @@ static ncclResult_t ofi_iflush(void* recvComm, void* buffer, int size,
 		goto exit;
 	}
 
-	mr_handle = (struct fid_mr *)mhandle;
+	mr_handle = ((nccl_ofi_mr_handle_t*)mhandle)->mr_handle;
 
 	data = buffer;
 #endif
