@@ -14,7 +14,10 @@
 #include <stack.h>
 #include <nccl_ofi_param.h>
 #include <nccl_ofi_mem.h>
+
+#if HAVE_GDRCOPY
 #include <gdrapi.h>
+#endif
 
 /* NCCL OFI lock for concurrency */
 pthread_mutex_t nccl_ofi_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -39,7 +42,9 @@ bool support_gdr = true;
  * platforms and should be disabled by default */
 bool cuda_flush = false;
 
+#if HAVE_GDRCOPY
 gdr_t gdr_desc = NULL;
+#endif
 
 /*
  * @brief	Allocates free list for NCCL OFI requests
@@ -711,6 +716,7 @@ static struct fi_info *get_nic_info(int dev, struct fi_info *nic_info_list)
 	return nic_info;
 }
 
+#if HAVE_GDRCOPY
 static ssize_t copy_from_hmem(void *dest, size_t size, enum fi_hmem_iface iface,
 		uint64_t device, const struct iovec *hmem_iov,
 		size_t hmem_iov_count, uint64_t hmem_iov_offset)
@@ -810,6 +816,7 @@ static ssize_t copy_to_hmem(enum fi_hmem_iface iface, uint64_t device,
 out:
 	return size_cpy;
 }
+#endif /* HAVE_GDRCOPY */
 
 
 /*
@@ -865,6 +872,7 @@ static ncclResult_t create_nccl_ofi_component(struct fi_info *prov,
 		goto error;
 	}
 
+#if HAVE_GDRCOPY
 	struct fi_hmem_override_ops hmem_ops;
 
 	hmem_ops.size = sizeof(struct fi_hmem_override_ops);
@@ -888,6 +896,7 @@ static ncclResult_t create_nccl_ofi_component(struct fi_info *prov,
 		ret = ncclSystemError;
 		goto error;
 	}
+#endif
 
 	/* Create transport level communication endpoint(s) */
 	ret = fi_endpoint(nccl_ofi_comp->domain, prov, &(nccl_ofi_comp->ep), NULL);
@@ -953,8 +962,11 @@ error:
 		fi_close((fid_t)nccl_ofi_comp->av);
 	if (nccl_ofi_comp->cq)
 		fi_close((fid_t)nccl_ofi_comp->cq);
-        if (gdr_desc)
-            gdr_close(gdr_desc);
+#if HAVE_GDRCOPY
+	if (gdr_desc)
+		gdr_close(gdr_desc);
+#endif
+
 exit:
 	return ret;
 }
@@ -1020,8 +1032,10 @@ void release_nccl_ofi_component(int dev)
 		fi_close((fid_t)nccl_ofi_comp->domain);
 	if (nccl_ofi_comp->fabric)
 		fi_close((fid_t)nccl_ofi_comp->fabric);
+#if HAVE_GDRCOPY
 	if (gdr_desc)
 		gdr_close(gdr_desc);
+#endif
 
 	free(nccl_ofi_comp);
 	nccl_ofi_component[dev] = NULL;
@@ -2604,6 +2618,7 @@ static ncclResult_t ofi_regMr(void *comm, void *data, int size, int type,
 		goto exit;
 	}
 
+#if HAVE_GDRCOPY
 	if (type == NCCL_PTR_CUDA) {
 		ret = nccl_ofi_buffer_register(data, size);
 		if (ret) {
@@ -2613,7 +2628,9 @@ static ncclResult_t ofi_regMr(void *comm, void *data, int size, int type,
 		}
 	}
 	/* No OFI registration and no GDR registration */
-	else if (mr_handle->mr_handle == NULL) {
+	else
+#endif
+	if (mr_handle->mr_handle == NULL) {
 		free(mr_handle);
 		mr_handle = NULL;
 	}
@@ -2652,6 +2669,7 @@ static ncclResult_t ofi_deregMr(void *comm, void *mhandle)
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Null MR handle provided. Skipping deregisteration.");
         }
 
+#if HAVE_GDRCOPY
 	if (mr_handle->type == NCCL_PTR_CUDA) {
 		ret = nccl_ofi_buffer_unregister(mr_handle->addr);
 		if (ret) {
@@ -2660,6 +2678,7 @@ static ncclResult_t ofi_deregMr(void *comm, void *mhandle)
 			goto exit;
 		}
 	}
+#endif
 
 	free(mr_handle);
 
@@ -2823,7 +2842,7 @@ static ncclResult_t ofi_irecv(void* recvComm, void* buffer, int size,
 		nccl_ofi_mr_handle_t **mr_handles = (nccl_ofi_mr_handle_t**) mhandles;
 		void *desc = NULL;
 
-		if (mr_handles[recv_n]->mr_handle != NULL) {
+		if (mr_handles[recv_n] && mr_handles[recv_n]->mr_handle != NULL) {
 			desc = fi_mr_desc(mr_handles[recv_n]->mr_handle);
 		}
 
