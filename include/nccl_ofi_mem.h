@@ -11,6 +11,7 @@ typedef struct nvshmem_gdr_buf_handle {
 	void *base_ptr;
 	gdr_info_t info;
 	gdr_mh_t mhandle;
+	int refs;
 } nccl_ofi_gdr_buf_handle_t;
 
 extern gdr_t gdr_desc;

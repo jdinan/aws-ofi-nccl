@@ -50,13 +50,12 @@ int nccl_ofi_buffer_register(void *addr, size_t length) {
 	}
 	else if (attr.type == cudaMemoryTypeHost) {
 		NCCL_OFI_WARN("Unable to register host memory (0x%p)", addr);
-		// FIXME: Better way to deal with this?
-		status = 0;
+		status = ncclSystemError;
 		goto out_error;
 	}
 	else if (attr.type == cudaMemoryTypeUnregistered) {
-		NCCL_OFI_WARN("Unable to register unregistered memory (0x%p)", addr);
-		status = 0;
+		NCCL_OFI_WARN("Unable to register unregistered memory type (0x%p)", addr);
+		status = ncclSystemError;
 		goto out_error;
 	}
 
@@ -104,22 +103,21 @@ int nccl_ofi_buffer_register(void *addr, size_t length) {
 				NCCL_OFI_WARN("Unable to register overlapping memory regions.");
 				status = ncclSystemError;
 			} else {
-				NCCL_OFI_WARN("Skipping request to register already registered buffer (0x%p, %zu).",
-						addr, length);
-				// FIXME: Do we need to reference count on the
-				// GDRCopy registration since multiple mhandles
-				// will use the same GDRCopy registration?
+				tmp_handle->refs++;
+				NCCL_OFI_WARN("Added ref to existing registration (0x%p, %zu, %d).",
+						addr, length, tmp_handle->refs);
 				status = 0;
 			}
 			goto out_unlock;
-			/* addr < tmp_handle->ptr */
 		} else {
+			/* addr < tmp_handle->ptr */
 			break;
 		}
 	}
 
 	handle->ptr = addr;
 	handle->length = length;
+	handle->refs = 1;
 
 	ret = gdr_pin_buffer(gdr_desc, (unsigned long) addr, length, 0, 0, &handle->mhandle);
 	if (ret) {
@@ -170,6 +168,12 @@ int nccl_ofi_buffer_unregister(void *addr) {
 		if (addr > tmp_handle->ptr) {
 			continue;
 		} else if (addr == tmp_handle->ptr) {
+			tmp_handle->refs--;
+			if (tmp_handle->refs > 0) {
+				NCCL_OFI_WARN("Released ref to registration (0x%p, %zu, %d).",
+						addr, length, tmp_handle->refs);
+				goto out_unlock;
+			}
 			if ((i + 1) < registered_buffer_array_used) {
 				memmove(&registered_buffers[i],
 						&registered_buffers[i + 1],
@@ -201,6 +205,7 @@ int nccl_ofi_buffer_unregister(void *addr) {
 		}
 	}
 
+out_unlock:
 	pthread_mutex_unlock(&nccl_ofi_lock);
 
 	return status;
