@@ -88,19 +88,27 @@ int nccl_ofi_buffer_register(void *addr, size_t length) {
 		registered_buffer_array_size = new_array_size;
 	}
 
-	/* TODO: This could be a binary search. */
 	for (i = 0; i < registered_buffer_array_used; i++) {
 		nccl_ofi_gdr_buf_handle_t *tmp_handle = registered_buffers[i];
 		if (addr > tmp_handle->ptr) {
+			void *max_addr;
+			max_addr = (void *)((char *)tmp_handle->ptr + tmp_handle->length);
+			if (addr < max_addr) {
+				ERROR_PRINT("Unable to register overlapping memory regions.\n");
+				status = NVSHMEMX_ERROR_INVALID_VALUE;
+				goto out_unlock;
+			}
 			continue;
-			/* FIXME: Improve the overlap check */
 		} else if (addr == tmp_handle->ptr) {
 			if (length != tmp_handle->length) {
 				NCCL_OFI_WARN("Unable to register overlapping memory regions.");
 				status = ncclSystemError;
 			} else {
-				NCCL_OFI_WARN("Unable to register the same buffer multiple times.");
-				// FIXME: WAR for unregister?
+				NCCL_OFI_WARN("Skipping request to register already registered buffer (0x%p, %zu).",
+						addr, length);
+				// FIXME: Do we need to reference count on the
+				// GDRCopy registration since multiple mhandles
+				// will use the same GDRCopy registration?
 				status = 0;
 			}
 			goto out_unlock;
@@ -238,7 +246,7 @@ nccl_ofi_gdr_buf_handle_t *nccl_ofi_get_registered_buffer_handle(void *addr, siz
 	if (registered_buffer_array_used == 0) {
 		goto out;
 	}
-#if 0
+#if 1
 	min = 0;
 	max = registered_buffer_array_used;
 	do {
@@ -248,11 +256,29 @@ nccl_ofi_gdr_buf_handle_t *nccl_ofi_get_registered_buffer_handle(void *addr, siz
 			break;
 		}
 		tmp_handle = registered_buffers[mid];
-		if ((char*)addr > (char*)tmp_handle->ptr + tmp_handle->length) {
+		if (addr > tmp_handle->ptr) {
+			max_addr = (void *)((char *)tmp_handle->ptr + tmp_handle->length);
+			max_len = (uint64_t)((char *)max_addr - (char *)addr);
+			if (addr < max_addr) {
+				if (len > max_len) {
+					NCCL_OFI_WARN("Requested range exceeds registered buffer length (0x%p, %zu) > (0x%p, %zu).",
+							addr, len, tmp_handle->ptr, tmp_handle->length);
+					ret_handle = NULL;
+				} else {
+					ret_handle = tmp_handle->handle;
+				}
+				goto out_unlock;
+			}
 			min = mid + 1;
-		} else if (addr >= tmp_handle->ptr) {
-			ret_handle = tmp_handle;
-			break;
+		} else if (addr == tmp_handle->ptr) {
+			if (len > tmp_handle->length) {
+				NCCL_OFI_WARN("Requested range exceeds registered buffer length (0x%p, %zu) > (0x%p, %zu).",
+						addr, len, tmp_handle->ptr, tmp_handle->length);
+				ret_handle = NULL;
+			} else {
+				ret_handle = tmp_handle->handle;
+			}
+			goto out_unlock;
 		} else {
 			if (mid == 0) {
 				break;
@@ -260,7 +286,7 @@ nccl_ofi_gdr_buf_handle_t *nccl_ofi_get_registered_buffer_handle(void *addr, siz
 			max = mid - 1;
 		}
 	} while (max >= min);
-#endif
+#else
 	for (size_t i = 0; i < registered_buffer_array_used; i++) {
 		tmp_handle = registered_buffers[i];
 		if (addr >= tmp_handle->ptr && (char*)addr+len <= (char*)tmp_handle->ptr + tmp_handle->length) {
@@ -268,7 +294,9 @@ nccl_ofi_gdr_buf_handle_t *nccl_ofi_get_registered_buffer_handle(void *addr, siz
 			break;
 		}
 	}
+#endif
 
+	// FIXME: Delete this. tmp_handle shouldn't be used here...
 	assert(addr >= tmp_handle->ptr && (char*)addr+len <= (char*)tmp_handle->ptr + tmp_handle->length);
 
 out:
