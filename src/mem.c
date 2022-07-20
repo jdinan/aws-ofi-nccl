@@ -66,7 +66,7 @@ int nccl_ofi_buffer_register(void *addr, size_t length) {
 		goto out_error;
 	}
 
-	NCCL_OFI_WARN("Registering (0x%p - 0x%p) length=%zu", addr, (char*)addr + length, length);
+	NCCL_OFI_TRACE(NCCL_NET, "Registering (0x%p - 0x%p) length=%zu", addr, (char*)addr + length, length);
 
 	pthread_mutex_lock(&nccl_ofi_lock);
 
@@ -93,8 +93,8 @@ int nccl_ofi_buffer_register(void *addr, size_t length) {
 			void *max_addr;
 			max_addr = (void *)((char *)tmp_handle->ptr + tmp_handle->length);
 			if (addr < max_addr) {
-				ERROR_PRINT("Unable to register overlapping memory regions.\n");
-				status = NVSHMEMX_ERROR_INVALID_VALUE;
+				NCCL_OFI_WARN("Unable to register overlapping memory regions.\n");
+				status = ncclSystemError;
 				goto out_unlock;
 			}
 			continue;
@@ -104,7 +104,7 @@ int nccl_ofi_buffer_register(void *addr, size_t length) {
 				status = ncclSystemError;
 			} else {
 				tmp_handle->refs++;
-				NCCL_OFI_WARN("Added ref to existing registration (0x%p, %zu, %d).",
+				NCCL_OFI_TRACE(NCCL_NET, "Added ref to existing registration (0x%p, %zu, %d).",
 						addr, length, tmp_handle->refs);
 				status = 0;
 			}
@@ -159,7 +159,7 @@ int nccl_ofi_buffer_unregister(void *addr) {
 	size_t i, ret;
 	int status = 0;
 
-	NCCL_OFI_WARN("Unregistering 0x%p", addr);
+	NCCL_OFI_TRACE(NCCL_NET, "Unregistering 0x%p", addr);
 
 	pthread_mutex_lock(&nccl_ofi_lock);
 
@@ -170,7 +170,7 @@ int nccl_ofi_buffer_unregister(void *addr) {
 		} else if (addr == tmp_handle->ptr) {
 			tmp_handle->refs--;
 			if (tmp_handle->refs > 0) {
-				NCCL_OFI_WARN("Released ref to registration (0x%p, %zu, %d).",
+				NCCL_OFI_TRACE(NCCL_NET, "Released ref to registration (0x%p, %zu, %d).",
 						addr, length, tmp_handle->refs);
 				goto out_unlock;
 			}
@@ -243,8 +243,6 @@ nccl_ofi_gdr_buf_handle_t *nccl_ofi_get_registered_buffer_handle(void *addr, siz
 	nccl_ofi_gdr_buf_handle_t *tmp_handle;
 	size_t min, max, mid;
 	nccl_ofi_gdr_buf_handle_t *ret_handle = NULL;
-
-	//NCCL_OFI_WARN("Buffer lookup addr=0x%p len=%zu", addr, len);
 
 	pthread_mutex_lock(&nccl_ofi_lock);
 

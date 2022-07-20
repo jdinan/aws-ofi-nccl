@@ -2663,7 +2663,7 @@ static ncclResult_t ofi_deregMr(void *comm, void *mhandle)
 		if (OFI_UNLIKELY(rc != 0)) {
 			ret = ncclSystemError;
 			NCCL_OFI_WARN("Unable to de-register memory. RC: %d, Error: %s",
-				      fi_strerror(-rc));
+				      rc, fi_strerror(-rc));
 		}
 	} else {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Null MR handle provided. Skipping deregisteration.");

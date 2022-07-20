@@ -5,6 +5,7 @@
 
 #include <gdrapi.h>
 
+//TODO: Rename with consistent prefix nccl_ofi_gdrcp_...
 typedef struct nvshmem_gdr_buf_handle {
 	void *ptr;
 	size_t length;
