@@ -170,8 +170,8 @@ int nccl_ofi_buffer_unregister(void *addr) {
 		} else if (addr == tmp_handle->ptr) {
 			tmp_handle->refs--;
 			if (tmp_handle->refs > 0) {
-				NCCL_OFI_TRACE(NCCL_NET, "Released ref to registration (0x%p, %zu, %d).",
-						addr, length, tmp_handle->refs);
+				NCCL_OFI_TRACE(NCCL_NET, "Released ref to registration (0x%p, %d).",
+						addr, tmp_handle->refs);
 				goto out_unlock;
 			}
 			if ((i + 1) < registered_buffer_array_used) {
@@ -260,17 +260,17 @@ nccl_ofi_gdr_buf_handle_t *nccl_ofi_get_registered_buffer_handle(void *addr, siz
 		}
 		tmp_handle = registered_buffers[mid];
 		if (addr > tmp_handle->ptr) {
-			max_addr = (void *)((char *)tmp_handle->ptr + tmp_handle->length);
-			max_len = (uint64_t)((char *)max_addr - (char *)addr);
+			void *max_addr = (void *)((char *)tmp_handle->ptr + tmp_handle->length);
+			size_t max_len = (size_t)((char *)max_addr - (char *)addr);
 			if (addr < max_addr) {
 				if (len > max_len) {
 					NCCL_OFI_WARN("Requested range exceeds registered buffer length (0x%p, %zu) > (0x%p, %zu).",
 							addr, len, tmp_handle->ptr, tmp_handle->length);
 					ret_handle = NULL;
 				} else {
-					ret_handle = tmp_handle->handle;
+					ret_handle = tmp_handle;
 				}
-				goto out_unlock;
+				goto out;
 			}
 			min = mid + 1;
 		} else if (addr == tmp_handle->ptr) {
@@ -279,9 +279,9 @@ nccl_ofi_gdr_buf_handle_t *nccl_ofi_get_registered_buffer_handle(void *addr, siz
 						addr, len, tmp_handle->ptr, tmp_handle->length);
 				ret_handle = NULL;
 			} else {
-				ret_handle = tmp_handle->handle;
+				ret_handle = tmp_handle;
 			}
-			goto out_unlock;
+			goto out;
 		} else {
 			if (mid == 0) {
 				break;
