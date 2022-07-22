@@ -2967,6 +2967,10 @@ static ncclResult_t ofi_iflush(void* recvComm, void* buffer, int size,
 	if (ofi_nccl_gdr_flush_disable() || !support_gdr)
 		goto exit;
 
+#if HAVE_GDRCOPY
+	__sync_synchronize();
+#endif
+
 #if CUDART_VERSION >= 11030
 	if (cuda_flush) {
 		cudaError_t cuda_ret = cudaDeviceFlushGPUDirectRDMAWrites(
