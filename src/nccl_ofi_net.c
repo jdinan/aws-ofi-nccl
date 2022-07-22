@@ -472,23 +472,24 @@ exit:
  *		non-zero on error
  */
 static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
-					int size, int type,
+					int size, int type, int remote_read,
 					struct fid_mr **mr_handle)
 {
 	ncclResult_t ret = ncclSuccess;
 	int rc;
 	struct fi_mr_attr mr_attr = {0};
 	struct iovec iov = {0};
+        static int key = 0;
 
 	/* Check if provider requires registration of local buffers */
-	if ((local_mr != true) && (type == NCCL_PTR_HOST)) {
+	if ((local_mr != true) && (type == NCCL_PTR_HOST) && (!remote_read)) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
 			"Skip registering host buffer. local_mr: %d", local_mr);
 		goto exit;
 	}
 
 	/* Check if provider requires registration of cuda device buffers */
-	if ((hmem_mr != true) && (type == NCCL_PTR_CUDA)) {
+	if ((hmem_mr != true) && (type == NCCL_PTR_CUDA) && (!remote_read)) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
 			"Skip registering CUDA buffer. hmem_mr: %d", hmem_mr);
 		goto exit;
@@ -501,7 +502,10 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 	/* Initialize MR attributes */
 	mr_attr.mr_iov = &iov;
 	mr_attr.iov_count = 1;
-	mr_attr.access = FI_SEND | FI_RECV;
+        if (remote_read)
+            mr_attr.access = FI_REMOTE_READ;
+        else
+            mr_attr.access = FI_SEND | FI_RECV;
 
 	if (type == NCCL_PTR_HOST) {
 		mr_attr.iface = FI_HMEM_SYSTEM;
@@ -514,12 +518,25 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 			goto exit;
 		}
 	}
+        mr_attr.requested_key = key++;
 
 	rc = fi_mr_regattr(nccl_ofi_component[comm->dev]->domain,
 			    &mr_attr, 0, mr_handle);
 	if (OFI_UNLIKELY(rc != 0)) {
 		NCCL_OFI_WARN("Unable to register memory (type = %d) for device %d. RC: %d, Error: %s",
 			       type, comm->dev, rc, fi_strerror(-rc));
+		ret = ncclSystemError;
+	}
+
+	rc = fi_mr_bind(*mr_handle, (fid_t)nccl_ofi_component[comm->dev]->ep, 0);
+	if (OFI_UNLIKELY(rc != 0)) {
+		NCCL_OFI_WARN("Unable to bind to EP");
+		ret = ncclSystemError;
+	}
+
+	rc = fi_mr_enable(*mr_handle);
+	if (OFI_UNLIKELY(rc != 0)) {
+		NCCL_OFI_WARN("Unable to enable EP");
 		ret = ncclSystemError;
 	}
 
@@ -535,7 +552,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 	if (request_gdr) {
 		hints->caps = FI_TAGGED | FI_MSG | FI_HMEM | FI_REMOTE_COMM;
 		if (!cuda_flush)
-			hints->caps |= FI_RMA | FI_READ;
+			hints->caps |= FI_RMA | FI_READ | FI_MR_ENDPOINT;
 		/*
 		 * Set MR mode bits to indicate that application allows
 		 * registration of both local and device memory buffers
@@ -2205,7 +2222,7 @@ static int alloc_and_reg_flush_buff(recvComm_t *rComm)
 
 	/* Register flush dummy buffer for provider access */
 	ret = register_mr_buffers(rComm, rComm->flush_buff.host_buffer,
-				  page_size, NCCL_PTR_HOST,
+				  page_size, NCCL_PTR_HOST, 1,
 				  &mr_handle);
 	if (OFI_UNLIKELY(ret != ncclSuccess)) {
 		NCCL_OFI_WARN("Could not register dummy buffer for flush, dev: %d",
@@ -2535,7 +2552,7 @@ static ncclResult_t ofi_accept(void *listenComm, void **recvComm)
 
 		/* Register flush dummy buffer for provider access */
 		ret = register_mr_buffers(rComm, rComm->flush_buff.host_buffer,
-					  page_size, NCCL_PTR_HOST,
+					  page_size, NCCL_PTR_HOST, 1,
 					  &mr_handle);
 		if (OFI_UNLIKELY(ret != ncclSuccess)) {
 			NCCL_OFI_WARN("Could not register dummy buffer for flush, dev: %d",
@@ -2610,7 +2627,7 @@ static ncclResult_t ofi_regMr(void *comm, void *data, int size, int type,
 	mr_handle->type = type;
 	mr_handle->mr_handle = NULL;
 
-	ret = register_mr_buffers(ofi_comm, data, size, type, &mr_handle->mr_handle);
+	ret = register_mr_buffers(ofi_comm, data, size, type, 0, &mr_handle->mr_handle);
 
 	if (ret) {
 		NCCL_OFI_WARN("register_mr_buffers failed (%d)", ret);
@@ -3081,7 +3098,7 @@ static ncclResult_t ofi_iflush(void* recvComm, void* buffer, int size,
 		rc = fi_read(rComm->local_ep, rComm->flush_buff.host_buffer,
 			     rComm->flush_buff.size,
 			     flush_mr_desc,
-			     rComm->local_ep_addr, (uint64_t)data,
+			     rComm->local_ep_addr, (uint64_t)/*data*/0,
 			     cuda_key, &req->ctx);
 		if (rc == 0) {
 			break;
