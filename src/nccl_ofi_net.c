@@ -556,7 +556,7 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 	/* Initialize MR attributes */
 	mr_attr.mr_iov = &iov;
 	mr_attr.iov_count = 1;
-	mr_attr.access = FI_SEND | FI_RECV;
+	mr_attr.access = FI_SEND | FI_RECV | FI_REMOTE_READ;
 
 	if (type == NCCL_PTR_HOST) {
 		mr_attr.iface = FI_HMEM_SYSTEM;
