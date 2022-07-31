@@ -3324,6 +3324,7 @@ static ncclResult_t ofi_closeRecv(void *recvComm)
 
 	dev = rComm->dev;
 
+	pthread_mutex_lock(&nccl_ofi_lock);
 	if (!ofi_nccl_gdr_flush_disable() && support_gdr && !cuda_flush) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "De-registering buffer for flush operations");
 		/* Deregister Flush buffer memory region */
@@ -3333,8 +3334,8 @@ static ncclResult_t ofi_closeRecv(void *recvComm)
 			if (OFI_UNLIKELY(rc != 0)) {
 				ret = ncclSystemError;
 				NCCL_OFI_WARN("Unable to de-register memory. RC: %d, Error: %s",
-					      fi_strerror(-rc));
-				goto exit;
+					      rc, fi_strerror(-rc));
+				goto unlock;
 			}
 		}
 		if (munmap(rComm->flush_buff.host_buffer, sysconf(_SC_PAGESIZE))) {
@@ -3346,10 +3347,9 @@ static ncclResult_t ofi_closeRecv(void *recvComm)
 	free_ofi_fl(rComm->nccl_ofi_reqs_fl);
 	free(recvComm);
 
-	pthread_mutex_lock(&nccl_ofi_lock);
 	put_nccl_ofi_comp(dev);
+unlock:
 	pthread_mutex_unlock(&nccl_ofi_lock);
-
 exit:
 	return ret;
 }
