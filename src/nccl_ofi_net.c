@@ -2294,7 +2294,7 @@ static ssize_t post_recv_conn(listenComm_t *lComm, char **buffer,
 	/* Progress NCCL OFI */
 	ret = nccl_ofi_progress(nccl_ofi_component[lComm->dev]);
 	if (OFI_UNLIKELY(ret != 0))
-		goto error;
+		return ncclSystemError;
 
 	return rc;
 }
