@@ -968,13 +968,6 @@ static ncclResult_t create_nccl_ofi_component(struct fi_info *prov,
 		ret = ncclSystemError;
 		goto error;
 	}
-
-	gdr_desc = gdr_open();
-	if (!gdr_desc) {
-		NCCL_OFI_WARN("GDRCopy initialization failed.");
-		ret = ncclSystemError;
-		goto error;
-	}
 #endif
 
 	/* Create transport level communication endpoint(s) */
@@ -1041,10 +1034,6 @@ error:
 		fi_close((fid_t)nccl_ofi_comp->av);
 	if (nccl_ofi_comp->cq)
 		fi_close((fid_t)nccl_ofi_comp->cq);
-#if HAVE_GDRCOPY
-	if (gdr_desc)
-		gdr_close(gdr_desc);
-#endif
 
 exit:
 	return ret;
@@ -1111,10 +1100,6 @@ void release_nccl_ofi_component(int dev)
 		fi_close((fid_t)nccl_ofi_comp->domain);
 	if (nccl_ofi_comp->fabric)
 		fi_close((fid_t)nccl_ofi_comp->fabric);
-#if HAVE_GDRCOPY
-	if (gdr_desc)
-		gdr_close(gdr_desc);
-#endif
 
 	free(nccl_ofi_comp);
 	nccl_ofi_component[dev] = NULL;
@@ -1426,6 +1411,15 @@ static ncclResult_t ofi_init(ncclDebugLogger_t logFunction)
 	for (idx = 0; idx < ofi_ndevices; idx++) {
 		nccl_ofi_component[idx] = NULL;
 	}
+
+#if HAVE_GDRCOPY
+	gdr_desc = gdr_open();
+	if (!gdr_desc) {
+		NCCL_OFI_WARN("GDRCopy initialization failed.");
+		ret = ncclSystemError;
+		goto exit;
+	}
+#endif
 
 exit:
 	if (ret != ncclSuccess) {
