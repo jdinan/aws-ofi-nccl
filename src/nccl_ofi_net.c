@@ -2291,6 +2291,11 @@ static ssize_t post_recv_conn(listenComm_t *lComm, char **buffer,
 		NCCL_OFI_WARN("Unable to post a buffer for receving connections for dev %d. RC: %zd, ERROR: %s",
 			      dev, rc, fi_strerror(-rc));
 
+	/* Progress NCCL OFI */
+	ret = nccl_ofi_progress(nccl_ofi_component[lComm->dev]);
+	if (OFI_UNLIKELY(ret != 0))
+		goto error;
+
 	return rc;
 }
 
@@ -3019,6 +3024,11 @@ static ncclResult_t ofi_irecv(void* recvComm, void* buffer, int size,
 
 	/* Return request to NCCL */
 	*request = req;
+
+	/* Progress NCCL OFI */
+	ret = nccl_ofi_progress(nccl_ofi_component[rComm->dev]);
+	if (OFI_UNLIKELY(ret != 0))
+		goto error;
 
 	goto exit;
 
