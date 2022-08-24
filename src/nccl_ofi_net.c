@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <sys/mman.h>
 #include <stack.h>
 #include <nccl_ofi_param.h>
@@ -77,6 +78,16 @@ static void free_mr_key(int dev, uint64_t key)
 {
 	if (prov_key_mr) {
 		NCCL_OFI_WARN("Invalid call to free_mr_key");
+		return;
+	}
+
+	if (key >= NCCL_OFI_MAX_MR_KEY) {
+		NCCL_OFI_WARN("Key value out of range (%"PRIu64")", key);
+		return;
+	}
+
+	if (mr_keys[dev * NCCL_OFI_MAX_MR_KEY + key] != false) {
+		NCCL_OFI_WARN("Attempted to free a key that's not in use (%"PRIu64")", key);
 		return;
 	}
 
@@ -571,6 +582,7 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 		NCCL_OFI_WARN("Unable to register memory (type = %d) for device %d. RC: %d, Error: %s",
 			       type, comm->dev, rc, fi_strerror(-rc));
 		ret = ncclSystemError;
+		goto exit;
 	}
 
 	if (endpoint_mr) {
@@ -578,12 +590,14 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 		if (OFI_UNLIKELY(rc != 0)) {
 			NCCL_OFI_WARN("Unable to bind MR to EP");
 			ret = ncclSystemError;
+			goto exit;
 		}
 
 		rc = fi_mr_enable(*mr_handle);
 		if (OFI_UNLIKELY(rc != 0)) {
 			NCCL_OFI_WARN("Unable to enable EP");
 			ret = ncclSystemError;
+			goto exit;
 		}
 	}
 
@@ -1231,7 +1245,7 @@ static ncclResult_t ofi_init(ncclDebugLogger_t logFunction)
 			       ofi_info_list->fabric_attr->prov_name);
 	}
 
-	/* Check if provider uses selects memory regisrtation keys */
+	/* Check if provider selects memory registration keys */
 	if (ofi_info_list->domain_attr->mr_mode & FI_MR_PROV_KEY) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Provider %s selects memory registration keys",
 			       ofi_info_list->fabric_attr->prov_name);
@@ -1242,6 +1256,7 @@ static ncclResult_t ofi_init(ncclDebugLogger_t logFunction)
 
 		mr_keys = malloc(sizeof(bool) * NCCL_OFI_MAX_MR_KEY * ofi_ndevices);
 		if (NULL == mr_keys) {
+			NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Unable to allocate MR keys table");
 			ret = ncclSystemError;
 			goto exit;
 		}
