@@ -24,8 +24,6 @@ int ofi_ndevices = -1;
 nccl_ofi_t **nccl_ofi_component = NULL;
 /* Indicates if memory registration of local buffers is required */
 bool local_mr = false;
-/* Indicates if memory registration of device buffers is required */
-bool hmem_mr = false;
 /* Indicates if endpoint memory registration is required */
 bool endpoint_mr = false;
 /* Indicates if remote virtual addressing is used */
@@ -539,13 +537,6 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 		goto exit;
 	}
 
-	/* Check if provider requires registration of cuda device buffers */
-	if ((hmem_mr != true) && (type == NCCL_PTR_CUDA) && (endpoint_mr != true)) {
-		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
-			"Skip registering CUDA buffer. hmem_mr: %d", hmem_mr);
-		goto exit;
-	}
-
 	/* Populate IOV vector for memory registration */
 	iov.iov_base = data;
 	iov.iov_len = size;
@@ -553,7 +544,10 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 	/* Initialize MR attributes */
 	mr_attr.mr_iov = &iov;
 	mr_attr.iov_count = 1;
-	mr_attr.access = FI_SEND | FI_RECV | FI_REMOTE_READ;
+	mr_attr.access = FI_SEND | FI_RECV;
+
+	if (type == NCCL_PTR_CUDA)
+		mr_attr.access |= FI_REMOTE_READ;
 
 	if (type == NCCL_PTR_HOST) {
 		mr_attr.iface = FI_HMEM_SYSTEM;
@@ -618,7 +612,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 		 * Set MR mode bits to indicate that application allows
 		 * registration of both local and device memory buffers
 		 */
-		hints->domain_attr->mr_mode = FI_MR_LOCAL | FI_MR_HMEM | FI_MR_ENDPOINT;
+		hints->domain_attr->mr_mode = FI_MR_LOCAL | FI_MR_ENDPOINT;
 		hints->domain_attr->mr_key_size = NCCL_OFI_MR_KEY_BYTES;
 	}
 	else {
@@ -1222,16 +1216,6 @@ static ncclResult_t ofi_init(ncclDebugLogger_t logFunction)
 		local_mr = true;
 	} else {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Provider %s does not require registration of local memory buffers",
-			       ofi_info_list->fabric_attr->prov_name);
-	}
-
-	/* Check if provider requires heterogeneous memory registration */
-	if (ofi_info_list->domain_attr->mr_mode & FI_MR_HMEM) {
-		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Provider %s requires registration of device buffers",
-			       ofi_info_list->fabric_attr->prov_name);
-		hmem_mr = true;
-	} else {
-		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Provider %s does not require registration of device buffers",
 			       ofi_info_list->fabric_attr->prov_name);
 	}
 
