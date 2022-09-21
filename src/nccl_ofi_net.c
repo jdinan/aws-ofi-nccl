@@ -1080,6 +1080,7 @@ static ncclResult_t ofi_init(ncclDebugLogger_t logFunction)
 	ofi_log_function = logFunction;
 
 	NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Using " PACKAGE_STRING);
+	NCCL_OFI_INFO(NCCL_INIT, "Using NCCL plugin version %d", PLUGIN_VERSION);
 
 	if (ofi_nccl_cuda_flush_enable()) {
 #if CUDART_VERSION < 11030
