@@ -14,8 +14,8 @@ extern "C" {
 #include <string.h>
 
 #define OFI_NCCL_PARAM_INT(name, env, default_value) \
-pthread_mutex_t ofi_nccl_param_lock_##name = PTHREAD_MUTEX_INITIALIZER; \
-int64_t ofi_nccl_##name() { \
+static pthread_mutex_t ofi_nccl_param_lock_##name = PTHREAD_MUTEX_INITIALIZER; \
+static int64_t ofi_nccl_##name() { \
     assert(default_value != -1LL); \
     static int64_t value = -1LL; \
     pthread_mutex_lock(&ofi_nccl_param_lock_##name); \
@@ -43,8 +43,8 @@ int64_t ofi_nccl_##name() { \
 }
 
 #define OFI_NCCL_PARAM_STR(name, env, default_value) \
-pthread_mutex_t ofi_nccl_param_lock_##name = PTHREAD_MUTEX_INITIALIZER; \
-char *ofi_nccl_##name() { \
+static pthread_mutex_t ofi_nccl_param_lock_##name = PTHREAD_MUTEX_INITIALIZER; \
+static char *ofi_nccl_##name() { \
     assert(default_value != NULL); \
     static char *value = NULL; \
     pthread_mutex_lock(&ofi_nccl_param_lock_##name); \

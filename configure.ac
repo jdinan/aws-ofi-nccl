@@ -17,6 +17,7 @@ AX_CHECK_ENABLE_DEBUG([no])
 AC_PROG_CC
 AC_PROG_CC_STDC
 AC_PROG_MAKE_SET
+AC_PROG_SED
 AM_PROG_AR
 
 # Checks for typedefs, structures, and compiler characteristics.
@@ -47,7 +48,8 @@ AC_ARG_WITH([nccl],
             AC_HELP_STRING([--with-nccl=PATH], [Path to non-standard NCCL installation]),
             [AS_IF([test -d $withval/lib64], [nccl_libdir="lib64"], [nccl_libdir="lib"])
              CFLAGS="-I$withval/include $CFLAGS"
-             LDFLAGS="-L$withval/$nccl_libdir $LDFLAGS"],
+             LDFLAGS="-L$withval/$nccl_libdir $LDFLAGS"
+             NCCL_INCLUDE_DIR="$withval/include"],
             [])
 
 AC_ARG_WITH([mpi],
@@ -72,6 +74,19 @@ AS_IF([test "x${enable_trace}" = "xyes" ],
        [trace=0
        AC_MSG_RESULT(no)])
 AC_DEFINE_UNQUOTED([OFI_NCCL_TRACE], [${trace}], [Defined to 1 if aws-ofi-nccl was configured with --enable-trace, 0 otherwise])
+
+# Get supported plugin versions from nccl_net.h header
+PLUGIN_VERSION_LIST=`$SED -rn 's/.*ncclNet_v(\S*)_t;/\1/p' $NCCL_INCLUDE_DIR/nccl_net.h | uniq`
+PLUGIN_VERSION_LIBS=""
+for version in $PLUGIN_VERSION_LIST
+do
+  if [[ $version -gt 1 ]]
+  then
+    echo "Found supported NCCL plugin version $version in nccl_net.h..."
+    PLUGIN_VERSION_LIBS="$PLUGIN_VERSION_LIBS libv$version.la "
+  fi
+done
+AC_SUBST([PLUGIN_VERSION_LIBS])
 
 # Checks for header files.
 AC_CHECK_HEADERS([limits.h stdlib.h string.h unistd.h rdma/fabric.h cuda_runtime.h], [],[

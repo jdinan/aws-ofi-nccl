@@ -14,23 +14,50 @@
 #include <stack.h>
 #include <nccl_ofi_param.h>
 
+#if (PLUGIN_VERSION == 2)
+typedef ncclNet_v2_t ncclNet_vx_t;
+#define PLUGIN_SYMBOL ncclNetPlugin_v2
+#elif (PLUGIN_VERSION == 3)
+typedef ncclNetProperties_v3_t ncclNetProperties_vx_t;
+typedef ncclNet_v3_t ncclNet_vx_t;
+#define PLUGIN_SYMBOL ncclNetPlugin_v3
+#elif (PLUGIN_VERSION == 4)
+typedef ncclNetProperties_v4_t ncclNetProperties_vx_t;
+typedef ncclNet_v4_t ncclNet_vx_t;
+#define PLUGIN_SYMBOL ncclNetPlugin_v4
+#elif (PLUGIN_VERSION == 5)
+#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 14, 0))
+// In NCCL 2.14.x, nccl_net.h header does not create alias for
+// ncclNetPropertives_v5_t so the v6 version is used here.
+typedef ncclNetProperties_v6_t ncclNetProperties_vx_t;
+#else
+typedef ncclNetProperties_v5_t ncclNetProperties_vx_t;
+#endif
+typedef ncclNet_v5_t ncclNet_vx_t;
+#define PLUGIN_SYMBOL ncclNetPlugin_v5
+#elif (PLUGIN_VERSION == 6)
+typedef ncclNetProperties_v6_t ncclNetProperties_vx_t;
+typedef ncclNet_v6_t ncclNet_vx_t;
+#define PLUGIN_SYMBOL ncclNetPlugin_v6
+#endif
+
 static uint32_t libversion = 0;
 /* NICs info list for a provider */
-struct fi_info* ofi_info_list = NULL;
+static struct fi_info* ofi_info_list = NULL;
 /* Number of NICs */
-int ofi_ndevices = -1;
+static int ofi_ndevices = -1;
 /* NCCL OFI component array for all NICs */
-nccl_ofi_t **nccl_ofi_component = NULL;
+static nccl_ofi_t **nccl_ofi_component = NULL;
 /* Indicates if memory registration of local buffers is required */
-bool local_mr = false;
+static bool local_mr = false;
 /* Indicates if memory registration of device buffers is required */
-bool hmem_mr = false;
+static bool hmem_mr = false;
 /* Indicates if GPUDirect is supported by libfabric provider */
-bool support_gdr = true;
+static bool support_gdr = true;
 /* Indicates if the cudaDeviceFlushGPUDirectRDMAWrites function should be used
  * to flush data to the GPU. Note, CUDA flush support is not supported on all
  * platforms and should be disabled by default */
-bool cuda_flush = false;
+static bool cuda_flush = false;
 
 /*
  * @brief	Allocates free list for NCCL OFI requests
@@ -92,7 +119,7 @@ exit:
 /*
  * @brief	Release free list for NCCL OFI requests
  */
-void free_ofi_fl(free_list_t *nccl_ofi_req_fl)
+static void free_ofi_fl(free_list_t *nccl_ofi_req_fl)
 {
 	if (!nccl_ofi_req_fl)
 		return;
@@ -867,7 +894,7 @@ exit:
 /*
  * @brief	Release various libfabric resources.
  */
-void release_nccl_ofi_component(int dev)
+static void release_nccl_ofi_component(int dev)
 {
 	nccl_ofi_t *nccl_ofi_comp = nccl_ofi_component[dev];
 
@@ -1053,6 +1080,7 @@ static ncclResult_t ofi_init(ncclDebugLogger_t logFunction)
 	ofi_log_function = logFunction;
 
 	NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Using " PACKAGE_STRING);
+	NCCL_OFI_INFO(NCCL_INIT, "Using NCCL plugin version %d", PLUGIN_VERSION);
 
 	if (ofi_nccl_cuda_flush_enable()) {
 #if CUDART_VERSION < 11030
@@ -1233,9 +1261,9 @@ static ncclResult_t ofi_ptrSupport(int dev, int *supportedTypes)
 	return ncclSuccess;
 }
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 6, 4)) /* Support NCCL v2.6 */
+#if (PLUGIN_VERSION >= 3) /* Support NCCL v2.6 */
 static ncclResult_t set_nic_props_default(int dev, struct fi_info *nic_prov,
-					  ncclNetProperties_t *props)
+					  ncclNetProperties_vx_t *props)
 {
 	ncclResult_t ret = ncclSuccess;
 
@@ -1250,7 +1278,7 @@ static ncclResult_t set_nic_props_default(int dev, struct fi_info *nic_prov,
 	props->maxComms = nic_prov->domain_attr->ep_cnt;
 	props->guid = dev;
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 	/*
 	 * Maximum number of grouped receives. Currently, we set it to 1 to
 	 * maintain single send/recv semantics (similar to NCCL versions < v2.12).
@@ -1274,10 +1302,10 @@ static ncclResult_t set_nic_props_default(int dev, struct fi_info *nic_prov,
 	return ret;
 }
 
-static ncclResult_t ofi_getProperties(int dev, ncclNetProperties_t *props)
+static ncclResult_t ofi_getProperties(int dev, ncclNetProperties_vx_t *props)
 {
 	ncclResult_t ret = ncclSuccess;
-	ncclNetProperties_t dev_props = {0};
+	ncclNetProperties_vx_t dev_props = {0};
 	struct fi_info *nic_prov = NULL;
 	struct fid_nic *nic_info = NULL;
 
@@ -1445,7 +1473,7 @@ exit:
 	return ret;
 }
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 /*
  * @brief	Creates send communication for a peer
  *
@@ -1938,7 +1966,7 @@ exit:
 }
 #endif
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 /*
  * @brief	Allocate a request to receive peer connection message
  *
@@ -2481,7 +2509,7 @@ exit:
 	return ret;
 }
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 static ncclResult_t ofi_isend(void *sendComm, void* data, int size,
 			      int tag, void *mhandle, void** request)
 #else
@@ -2576,7 +2604,7 @@ exit:
 	return ret;
 }
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 static ncclResult_t ofi_irecv(void* recvComm, int n, void** buffers, int* sizes,
 			      int *tags, void** mhandles, void** request)
 #else
@@ -2622,7 +2650,7 @@ static ncclResult_t ofi_irecv(void* recvComm, void* buffer, int size,
 	req->dev = rComm->dev;
 	req->direction = NCCL_OFI_RECV;
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 	req->num_recvs = n;
 
 	if (OFI_UNLIKELY(mhandles == NULL)) {
@@ -2741,7 +2769,7 @@ exit:
 	return ret;
 }
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 static ncclResult_t ofi_iflush(void* recvComm, int n, void** buffers, int* sizes,
 			       void** mhandles, void** request)
 #else
@@ -2784,7 +2812,7 @@ static ncclResult_t ofi_iflush(void* recvComm, void* buffer, int size,
 		goto exit;
 	}
 
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 	/* Plugin only supports one receive per request */
 	assert(n == 1);
 
@@ -2906,7 +2934,7 @@ exit:
 	return ret;
 }
 
-#if (NCCL_VERSION_CODE < NCCL_VERSION(2, 8, 0))
+#if (PLUGIN_VERSION < 4)
 static ncclResult_t ofi_flush(void* recvComm, void* data, int size,
 			      void *mhandle)
 {
@@ -3042,29 +3070,31 @@ exit:
 	return ret;
 }
 
-const ncclNet_t NCCL_PLUGIN_SYMBOL = {
+const ncclNet_vx_t PLUGIN_SYMBOL = {
 	.name = "AWS Libfabric",
 	.init = ofi_init,
 	.devices = ofi_devices,
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 6, 4)) /* Support NCCL v2.6 */
+#if (PLUGIN_VERSION >= 3) /* Support NCCL v2.6 */
 	.getProperties = ofi_getProperties,
 #else /* Support NCCL version >= v2.4.x and < v2.6.x */
 	.pciPath = ofi_pciPath,
 	.ptrSupport = ofi_ptrSupport,
 #endif
 	.listen = ofi_listen,
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 12, 0)) /* Support NCCL v2.12 */
+#if (PLUGIN_VERSION >= 5) /* Support NCCL v2.12 */
 	.connect = ofi_iconnect,
 	.accept = ofi_iaccept,
 #else
 	.connect = ofi_connect,
 	.accept = ofi_accept,
 #endif
+#if (PLUGIN_VERSION > 1)
 	.regMr = ofi_regMr,
 	.deregMr = ofi_deregMr,
+#endif
 	.isend = ofi_isend,
 	.irecv = ofi_irecv,
-#if (NCCL_VERSION_CODE >= NCCL_VERSION(2, 8, 0)) /* Support NCCL v2.8 */
+#if (PLUGIN_VERSION >= 4) /* Support NCCL v2.8 */
 	.iflush = ofi_iflush,
 #else
 	.flush = ofi_flush,
