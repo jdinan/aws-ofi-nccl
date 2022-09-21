@@ -11,7 +11,6 @@ AM_LDFLAGS = -lcudart
 lib_LTLIBRARIES = libnccl-net.la
 libnccl_net_la_SOURCES =
 
-#libnccl_net_la_LIBADD = libv4.la libv5.la
 libnccl_net_la_LIBADD = $(PLUGIN_VERSION_LIBS)
 libnccl_net_la_DEPENDENCIES = $(PLUGIN_VERSION_LIBS)
 
