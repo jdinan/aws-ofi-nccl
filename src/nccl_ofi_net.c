@@ -197,7 +197,7 @@ static const char *nccl_ofi_req_state_str(nccl_ofi_req_state_t state)
 	}
 }
 
-static const char *nccl_ofi_req_direction_str(nccl_ofi_req_state_t state)
+static const char *nccl_ofi_req_direction_str(nccl_ofi_req_direction_t state)
 {
 	switch(state) {
 	case NCCL_OFI_SEND:
@@ -815,13 +815,15 @@ static ssize_t copy_from_hmem(void *dest, size_t size, enum fi_hmem_iface iface,
 	assert(hmem_iov_offset < hmem_iov_count);
 
 	for (size_t i = hmem_iov_offset; i < hmem_iov_count; i++) {
+		ptrdiff_t offset;
+		nccl_ofi_hcopy_buf_handle_t *buf_hdl;
+
 		if (size_cpy + hmem_iov[i].iov_len > size)
 			break;
 
 		switch (iface) {
 			case FI_HMEM_CUDA:
-				nccl_ofi_hcopy_buf_handle_t *buf_hdl =
-					nccl_ofi_get_hcopy_buffer_handle(hmem_iov[i].iov_base, hmem_iov[i].iov_len);
+				buf_hdl = nccl_ofi_get_hcopy_buffer_handle(hmem_iov[i].iov_base, hmem_iov[i].iov_len);
 
 				if (NULL == buf_hdl) {
 					NCCL_OFI_WARN("Could not locate GDRCopy registration for 0x%p len=%zu",
@@ -830,7 +832,7 @@ static ssize_t copy_from_hmem(void *dest, size_t size, enum fi_hmem_iface iface,
 					goto out;
 				}
 
-				ptrdiff_t offset = (uint64_t)hmem_iov[i].iov_base - buf_hdl->info.va;
+				offset = (uint64_t)hmem_iov[i].iov_base - buf_hdl->info.va;
 				ret = gdr_copy_from_mapping(buf_hdl->mhandle, dest_ptr,
 						(char *)buf_hdl->base_ptr + offset, hmem_iov[i].iov_len);
 				if (ret) {
@@ -865,13 +867,15 @@ static ssize_t copy_to_hmem(enum fi_hmem_iface iface, uint64_t device,
 	assert(hmem_iov_offset < hmem_iov_count);
 
 	for (size_t i = hmem_iov_offset; i < hmem_iov_count; i++) {
+		ptrdiff_t offset;
+		nccl_ofi_hcopy_buf_handle_t *buf_hdl;
+
 		if (size_cpy + hmem_iov[i].iov_len > size)
 			break;
 
 		switch (iface) {
 			case FI_HMEM_CUDA:
-				nccl_ofi_hcopy_buf_handle_t *buf_hdl =
-					nccl_ofi_get_hcopy_buffer_handle(hmem_iov[i].iov_base, hmem_iov[i].iov_len);
+				buf_hdl = nccl_ofi_get_hcopy_buffer_handle(hmem_iov[i].iov_base, hmem_iov[i].iov_len);
 
 				if (NULL == buf_hdl) {
 					NCCL_OFI_WARN("Could not locate GDRCopy registration for 0x%p len=%zu",
@@ -880,7 +884,7 @@ static ssize_t copy_to_hmem(enum fi_hmem_iface iface, uint64_t device,
 					goto out;
 				}
 
-				ptrdiff_t offset = (uint64_t)hmem_iov[i].iov_base - buf_hdl->info.va;
+				offset = (uint64_t)hmem_iov[i].iov_base - buf_hdl->info.va;
 				ret = gdr_copy_to_mapping(buf_hdl->mhandle,
 						(char *)buf_hdl->base_ptr + offset, src_ptr, hmem_iov[i].iov_len);
 				if (ret) {
