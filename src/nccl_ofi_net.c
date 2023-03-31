@@ -550,7 +550,7 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 	struct iovec iov = {0};
 
 	/* Check if provider requires registration of local buffers */
-	if ((local_mr != true) && (type == NCCL_PTR_HOST)) {
+	if ((local_mr != true) && (type == NCCL_PTR_HOST) && 0) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
 			"Skip registering host buffer. local_mr: %d", local_mr);
 		goto exit;
@@ -568,7 +568,7 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 	if (type == NCCL_PTR_CUDA)
 		mr_attr.access |= FI_REMOTE_READ;
 	else
-		mr_attr.access |= FI_READ;
+		mr_attr.access |= FI_READ | FI_REMOTE_WRITE;
 
 	if (type == NCCL_PTR_HOST) {
 		mr_attr.iface = FI_HMEM_SYSTEM;
@@ -630,7 +630,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 	if (request_gdr) {
 		hints->caps = FI_TAGGED | FI_MSG | FI_HMEM | FI_REMOTE_COMM;
 		if (!cuda_flush)
-			hints->caps |= FI_RMA | FI_READ;
+			hints->caps |= FI_RMA | FI_READ | FI_WRITE;
 		/*
 		 * Set MR mode bits to indicate that application allows
 		 * registration of both local and device memory buffers
@@ -3224,12 +3224,29 @@ static ncclResult_t ofi_iflush(void* recvComm, void* buffer, int size,
 
 	/* Issue RDMA read */
 	do {
+#if 0
 		rc = fi_read(rComm->local_ep, rComm->flush_buff.host_buffer,
 			     rComm->flush_buff.size,
 			     flush_mr_desc,
 			     rComm->local_ep_addr,
 			     (uint64_t)(virt_addr_mr ? data : 0),
 			     cuda_key, &req->ctx);
+#endif
+
+		void * data_mr_desc = fi_mr_desc(mr_handle);
+		uint64_t flush_key = fi_mr_key(rComm->flush_buff.mr_handle);
+		if (OFI_UNLIKELY(cuda_key == FI_KEY_NOTAVAIL)) {
+			ret = ncclSystemError;
+			NCCL_OFI_WARN("Memory registration may not have completed.");
+			goto error;
+		}
+
+		rc = fi_write(rComm->local_ep, data,
+			      rComm->flush_buff.size,
+			      data_mr_desc,
+			      rComm->local_ep_addr,
+			      (uint64_t)(virt_addr_mr ? rComm->flush_buff.host_buffer : 0),
+			      flush_key, &req->ctx);
 		if (rc == 0) {
 			break;
 		}
