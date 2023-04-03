@@ -1017,7 +1017,7 @@ static ncclResult_t create_nccl_ofi_component(struct fi_info *prov,
 	}
 
 	/* Bind CQ and AV to endpoint */
-	ret = fi_ep_bind(nccl_ofi_comp->ep, (fid_t)nccl_ofi_comp->cq, FI_SEND | FI_RECV);
+	ret = fi_ep_bind(nccl_ofi_comp->ep, (fid_t)nccl_ofi_comp->cq, FI_TRANSMIT | FI_RECV);
 	if (OFI_UNLIKELY(ret != 0)) {
 		NCCL_OFI_WARN("Couldn't bind EP-CQ. RC: %d, ERROR: %s",
 			     ret, fi_strerror(-ret));
