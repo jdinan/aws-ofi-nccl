@@ -661,6 +661,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 	/* Set MR mode bits to indicate FI_MR_BASIC registration */
 	hints->domain_attr->mr_mode |= FI_MR_VIRT_ADDR | FI_MR_ALLOCATED | FI_MR_PROV_KEY;
 
+	hints->tx_attr->op_flags = FI_DELIVERY_COMPLETE;
 	hints->tx_attr->msg_order = FI_ORDER_SAS;
 	hints->rx_attr->msg_order = FI_ORDER_SAS;
 }
