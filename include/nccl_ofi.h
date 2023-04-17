@@ -196,7 +196,7 @@ typedef struct comm {
     int dev;
     uint64_t tag;
     uint64_t num_inflight_reqs;
-    uint64_t next_tag;
+    uint64_t next_id;
     fi_addr_t remote_ep;
     fi_addr_t local_ep_addr;
     struct fid_ep *local_ep;
@@ -242,7 +242,7 @@ typedef struct nccl_ofi_req {
 
 	/* RDMA Write support */
 	uint64_t mr_key;
-	uint64_t write_tag;
+	uint64_t msg_id;
 
 	const void *data;
 	size_t write_size;

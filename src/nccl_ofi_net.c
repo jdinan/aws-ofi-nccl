@@ -29,8 +29,8 @@
 #include <gdrapi.h>
 #endif
 
-#define MAX_PENDING_WRITES ((1 << 8) - 1)
-#define WRITE_TAG_MASK  ((1 << 8) - 1)
+#define MAX_PENDING_MSG ((1 << 8) - 1)
+#define MSG_ID_MASK  ((1 << 8) - 1)
 #define CTS_TAG(comm) ((comm)->baseComm.ofi_comp->max_tag + 1 /* control bit */ + (1 << 8))
 #define ACK_TAG(comm) ((comm)->baseComm.ofi_comp->max_tag + 1 /* control bit */ + (2 << 8))
 
@@ -327,7 +327,7 @@ static inline void zero_nccl_ofi_req(nccl_ofi_req_t *req)
 	req->direction = -1;
 
 	req->mr_key = 0;
-	req->write_tag = 0;
+	req->msg_id = 0;
 	req->data = NULL;
 	req->write_size = 0;
 	req->desc = NULL;
@@ -707,7 +707,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 		 * registration of both local and device memory buffers
 		 * and can support the endpoint memory registration model
 		 */
-		hints->domain_attr->mr_mode = FI_MR_LOCAL | FI_MR_HMEM | FI_MR_ENDPOINT;
+		hints->domain_attr->mr_mode = /* FI_MR_LOCAL */ | FI_MR_HMEM | FI_MR_ENDPOINT;
 		hints->domain_attr->mr_key_size = (size_t) ofi_nccl_mr_key_size();
 	}
 	else {
@@ -730,7 +730,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 	hints->domain_attr->data_progress = FI_PROGRESS_UNSPEC;
 
 	/* Set MR mode bits to indicate FI_MR_BASIC registration */
-	hints->domain_attr->mr_mode |= FI_MR_VIRT_ADDR | FI_MR_ALLOCATED | FI_MR_PROV_KEY;
+	hints->domain_attr->mr_mode |= /* FI_MR_VIRT_ADDR */ | FI_MR_ALLOCATED | FI_MR_PROV_KEY;
 
 	hints->tx_attr->msg_order = FI_ORDER_SAS;
 	hints->rx_attr->msg_order = FI_ORDER_SAS;
@@ -1313,14 +1313,17 @@ static inline ncclResult_t process_completions(
 		req = container_of(op_ctx, nccl_ofi_req_t, ctx);
 
 		if (comp_flags & FI_RECV && cq_entry[comp_idx].tag & CTS_TAG(req->sComm)) {
-			// RDMA Write Protocol: CTS Recv completed, issue fi_write
-			req->write_tag = cq_entry[comp_idx].tag & WRITE_TAG_MASK;
+			// RDMA Write Protocol: CTS message received
 
+                        // Capture the tag that should be echoed back on the ACK
+			req->msg_id = cq_entry[comp_idx].tag & MSG_ID_MASK;
+
+                        // Send data payload using the MR key received in the CTS message
 			int rc = fi_write(req->sComm->local_ep, req->data, req->write_size, req->desc,
 					req->sComm->remote_ep,
-					/* FIXME: Assuming !FI_MR_VIRT_ADDR */ 0, req->mr_key, &req->ctx);
+					/* Assuming !FI_MR_VIRT_ADDR */ 0, req->mr_key, &req->ctx);
 			if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
-				// FIXME: Better way to handle EAGAIN?
+				// FIXME: Need a better way to handle EAGAIN
 				NCCL_OFI_WARN("Could not issue fi_write request for device %d. RC: %zd",
 						req->sComm->dev, rc);
 				ret = ncclSystemError;
@@ -1334,32 +1337,36 @@ static inline ncclResult_t process_completions(
 			}
 		}
 		else if (comp_flags & FI_SEND && cq_entry[comp_idx].tag & CTS_TAG(req->rComm)) {
-			// CTS Send completed, nothing to do
+			// RDMA Write Protocol: CTS message was sent
 			// Continue waiting for the ACK recv to complete
 		}
 		else if (comp_flags & FI_RECV && cq_entry[comp_idx].tag & ACK_TAG(req->sComm)) {
-			// ACK Recv completed, recv request is completed
+			// RDMA Write Protocol: ACK message received, user iRecv is completed
+                        // Update the request using the write_size received in the ACK
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
 		else if (comp_flags & FI_SEND && cq_entry[comp_idx].tag & ACK_TAG(req->rComm)) {
-			// ACK Send completed, send request is now completed
+			// RDMA Write Protocol: ACK message sent, user iSend is completed
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
 		else if (comp_flags & FI_WRITE) {
-			// RDMA Write completed, send ACK to receiver
+			// RDMA Write Procotol: Write completed, send ACK to receiver
+                        //   ACK payload contains the the size of the data transfer
+                        //   Echo back the tag that was used on the CTS message
 			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
 					NULL, req->sComm->remote_ep,
-					req->sComm->tag | ACK_TAG(req->sComm) | req->write_tag, &req->ctx);
+					req->sComm->tag | ACK_TAG(req->sComm) | req->msg_id, &req->ctx);
 			if (rc == -FI_EAGAIN) {
-				NCCL_OFI_WARN("Unable to post ACK receive for dev %d. RC: %zd, ERROR: %s",
+				// FIXME: Need a better way to handle EAGAIN
+				NCCL_OFI_WARN("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
 						req->sComm->dev, rc, fi_strerror(-rc));
 				ret = ncclSystemError;
 				goto error;
 			}
 			else if (rc != 0) {
-				NCCL_OFI_WARN("Unable to post ACK receive for dev %d. RC: %zd, ERROR: %s",
+				NCCL_OFI_WARN("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
 						req->sComm->dev, rc, fi_strerror(-rc));
 				ret = ncclSystemError;
 				goto error;
@@ -2019,7 +2026,7 @@ static inline int create_sendComm(int dev, nccl_ofi_handle_t *ofi_handle, nccl_o
 	}
 
 	sComm->tag = tag;
-	sComm->next_tag = 0;
+	sComm->next_id = 0;
 	sComm->local_ep = nccl_ofi_comp->ep;
 	sComm->remote_ep = remote_addr;
 	sComm->dev = dev;
@@ -2432,7 +2439,7 @@ static recvComm_t *prepare_recv_comm(listenComm_t *lComm, char *remote_ep_addr)
 	}
 
 	rComm->tag = lComm->tag;
-	rComm->next_tag = 0;
+	rComm->next_id = 0;
 	rComm->local_ep = lComm->local_ep;
 	rComm->local_ep_addr = lComm->local_ep_addr;
 	rComm->remote_ep = remote_ep;
@@ -2857,8 +2864,8 @@ ncclResult_t nccl_net_ofi_isend(void *sendComm, void* data, int size,
 	req->desc = desc;
 
 	/* Post recv for CTS message containing the MR key */
-	rc = fi_trecv(sComm->local_ep, &req->mr_key, sizeof(uint64_t), /* FIXME: Assuming !FI_MR_LOCAL */ NULL,
-		      sComm->remote_ep, sComm->tag | CTS_TAG(sComm), WRITE_TAG_MASK, &req->ctx);
+	rc = fi_trecv(sComm->local_ep, &req->mr_key, sizeof(uint64_t), /* Assuming !FI_MR_LOCAL */ NULL,
+		      sComm->remote_ep, sComm->tag | CTS_TAG(sComm), MSG_ID_MASK, &req->ctx);
 	if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 		// FIXME: Can we return NULL here rather than raising an error?
 		NCCL_OFI_WARN("Could not issue CTS recv request for device %d. RC: %zd",
@@ -2987,12 +2994,12 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 		/* RDMA Write Protocol */
 
 		req->mr_key = fi_mr_key(mr_handles[recv_n]->fi_handle);
-		req->write_tag = rComm->next_tag;
-		rComm->next_tag = (rComm->next_tag + 1) % MAX_PENDING_WRITES;
+		req->msg_id = rComm->next_id;
+		rComm->next_id = (rComm->next_id + 1) % MAX_PENDING_MSG;
 
 		/* Post send for CTS message containing the MR key */
-		rc = fi_tsend(rComm->local_ep, &req->mr_key, sizeof(uint64_t), /* FIXME: desc */ NULL,
-				rComm->remote_ep, rComm->tag | CTS_TAG(rComm) | req->write_tag, &req->ctx);
+		rc = fi_tsend(rComm->local_ep, &req->mr_key, sizeof(uint64_t), NULL,
+				rComm->remote_ep, rComm->tag | CTS_TAG(rComm) | req->msg_id, &req->ctx);
 		if (rc == -FI_EAGAIN) {
 			NCCL_OFI_WARN("Unable to post CTS send for dev %d. RC: %zd, ERROR: %s",
 					rComm->dev, rc, fi_strerror(-rc));
@@ -3007,8 +3014,8 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 		}
 
 		/* Post ACK recv operation */
-		rc = fi_trecv(rComm->local_ep, &req->write_size, sizeof(uint64_t),
-				NULL, rComm->remote_ep, rComm->tag | ACK_TAG(rComm) | req->write_tag, 0, &req->ctx);
+		rc = fi_trecv(rComm->local_ep, &req->write_size, sizeof(uint64_t), NULL,
+				rComm->remote_ep, rComm->tag | ACK_TAG(rComm) | req->msg_id, 0, &req->ctx);
 		if (rc == -FI_EAGAIN) {
 			NCCL_OFI_WARN("Unable to post ACK receive for dev %d. RC: %zd, ERROR: %s",
 					rComm->dev, rc, fi_strerror(-rc));
