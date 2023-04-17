@@ -245,7 +245,7 @@ typedef struct nccl_ofi_req {
 	uint64_t write_tag;
 
 	const void *data;
-	size_t size;
+	size_t write_size;
 	void *desc;
 } nccl_ofi_req_t;
 
