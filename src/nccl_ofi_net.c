@@ -707,7 +707,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 		 * registration of both local and device memory buffers
 		 * and can support the endpoint memory registration model
 		 */
-		hints->domain_attr->mr_mode = /* FI_MR_LOCAL */ | FI_MR_HMEM | FI_MR_ENDPOINT;
+		hints->domain_attr->mr_mode = /* FI_MR_LOCAL | */ FI_MR_HMEM | FI_MR_ENDPOINT;
 		hints->domain_attr->mr_key_size = (size_t) ofi_nccl_mr_key_size();
 	}
 	else {
@@ -730,7 +730,7 @@ static void get_hints(struct fi_info *hints, int request_gdr)
 	hints->domain_attr->data_progress = FI_PROGRESS_UNSPEC;
 
 	/* Set MR mode bits to indicate FI_MR_BASIC registration */
-	hints->domain_attr->mr_mode |= /* FI_MR_VIRT_ADDR */ | FI_MR_ALLOCATED | FI_MR_PROV_KEY;
+	hints->domain_attr->mr_mode |= /* FI_MR_VIRT_ADDR | */ FI_MR_ALLOCATED | FI_MR_PROV_KEY;
 
 	hints->tx_attr->msg_order = FI_ORDER_SAS;
 	hints->rx_attr->msg_order = FI_ORDER_SAS;
