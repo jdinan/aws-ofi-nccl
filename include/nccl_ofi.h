@@ -196,6 +196,7 @@ typedef struct comm {
     int dev;
     uint64_t tag;
     uint64_t num_inflight_reqs;
+    uint64_t next_tag;
     fi_addr_t remote_ep;
     fi_addr_t local_ep_addr;
     struct fid_ep *local_ep;
@@ -238,6 +239,14 @@ typedef struct nccl_ofi_req {
 
 	/* Direction of request */
 	nccl_ofi_req_direction_t direction;
+
+	/* RDMA Write support */
+	uint64_t mr_key;
+	uint64_t write_tag;
+
+	const void *data;
+	size_t size;
+	void *desc;
 } nccl_ofi_req_t;
 
 typedef struct pending_req {
