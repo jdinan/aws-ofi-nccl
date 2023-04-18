@@ -247,6 +247,7 @@ typedef struct nccl_ofi_req {
 	const void *data;
 	size_t write_size;
 	void *desc;
+	int is_rdma_write;
 } nccl_ofi_req_t;
 
 typedef struct pending_req {

@@ -29,13 +29,13 @@
 #include <gdrapi.h>
 #endif
 
-//#define DEBUG(...)
-#define DEBUG(...) printf(__VA_ARGS__)
+#define DEBUG(...)
+//#define DEBUG(...) printf(__VA_ARGS__)
 
-#define MAX_PENDING_MSG ((1 << 8) - 1)
-#define MSG_ID_MASK     ((1 << 8) - 1)
-#define MSG_ID_SHIFT    36
-#define MSG_ID_IGNORE   (0xFFul << MSG_ID_SHIFT)
+#define MAX_PENDING_MSG ((1 << 16) - 1)
+#define MSG_ID_MASK     ((1 << 16) - 1)
+#define MSG_ID_SHIFT    28
+#define MSG_ID_IGNORE   (0xFFFFul << MSG_ID_SHIFT)
 #define CTRL_BIT (1ul << 47)
 #define CTS_BIT  (1ul << 46)
 #define ACK_BIT  (1ul << 45)
@@ -339,6 +339,7 @@ static inline void zero_nccl_ofi_req(nccl_ofi_req_t *req)
 	req->data = NULL;
 	req->write_size = 0;
 	req->desc = NULL;
+	req->is_rdma_write = 0;
 }
 
 /*
@@ -1346,26 +1347,30 @@ static inline ncclResult_t process_completions(
 				goto error;
 			}
 		}
-		else if (comp_flags & FI_SEND && ((cq_entry[comp_idx].tag & CTS_TAG(req->rComm)) == CTS_TAG(req->rComm))) {
+		else if (comp_flags & FI_SEND && req->is_rdma_write && req->direction == NCCL_OFI_RECV) {
 			// RDMA Write Protocol: CTS message was sent
 			// Continue waiting for the ACK recv to complete
+			// Note tag is not returned on a send completion
+			DEBUG("Fin  CTS (tag = 0x%lx)\n", CTS_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->rComm->tag);
 		}
 		else if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & ACK_TAG(req->rComm)) == ACK_TAG(req->rComm))) {
 			// RDMA Write Protocol: ACK message received, user iRecv is completed
-                        // Update the request using the write_size received in the ACK
+			// Update the request using the write_size received in the ACK
 			DEBUG("Recv ACK (tag = 0x%lx)\n", cq_entry[comp_idx].tag);
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
-		else if (comp_flags & FI_SEND && ((cq_entry[comp_idx].tag & ACK_TAG(req->sComm)) == ACK_TAG(req->sComm))) {
+		else if (comp_flags & FI_SEND && req->is_rdma_write && req->direction == NCCL_OFI_SEND) {
 			// RDMA Write Protocol: ACK message sent, user iSend is completed
+			// Note tag is not returned on a send completion
+			DEBUG("Fin  ACK (tag = 0x%lx)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag);
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
 		else if (comp_flags & FI_WRITE) {
 			// RDMA Write Procotol: Write completed, send ACK to receiver
-                        //   ACK payload contains the the size of the data transfer
-                        //   Echo back the tag that was used on the CTS message
+			//   ACK payload contains the the size of the data transfer
+			//   Echo back the tag that was used on the CTS message
 			DEBUG("Send ACK (tag = 0x%lx)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag);
 			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
 					NULL, req->sComm->remote_ep,
@@ -1385,13 +1390,26 @@ static inline ncclResult_t process_completions(
 			}
 		}
 		else {
-			DEBUG("---- --- (tag = 0x%lx, flags = 0x%lx)\n", cq_entry[comp_idx].tag, comp_flags);
+			if (comp_flags & FI_READ)
+				DEBUG("-- Flush (tag = -----, flags = 0x%lx)\n", comp_flags);
+			else if (comp_flags & FI_WRITE)
+				DEBUG("-- Write (tag = -----, flags = 0x%lx)\n", comp_flags);
+			else if (comp_flags & FI_RECV)
+				DEBUG("-- Recv  (tag = 0x%lx, flags = 0x%lx)\n", cq_entry[comp_idx].tag, comp_flags);
+			else if (comp_flags & FI_SEND)
+				DEBUG("-- Send  (tag = 0x%lx, flags = 0x%lx)\n", cq_entry[comp_idx].tag, comp_flags);
+			else if (comp_flags & FI_TAGGED)
+				DEBUG("-- ----- (tag = 0x%lx, flags = 0x%lx)\n", cq_entry[comp_idx].tag, comp_flags);
+			else
+				DEBUG("-- ----- (tag = xxx, flags = 0x%lx)\n", comp_flags);
+
+			// FIXME: This should be freed later. This causes use after free.
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, cq_entry[comp_idx].len);
 
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 
 			/* Determine if this is control message */
-			if (OFI_UNLIKELY(cq_entry[comp_idx].tag & control_bit_mask)) {
+			if ((cq_entry[comp_idx].flags & FI_TAGGED) && (OFI_UNLIKELY(cq_entry[comp_idx].tag & control_bit_mask))) {
 				if (comp_flags & FI_RECV) {
 					/* Mark listenComm to accepted state */
 					req->lComm->accepted = true;
@@ -2875,6 +2893,7 @@ ncclResult_t nccl_net_ofi_isend(void *sendComm, void* data, int size,
 	req->data = data;
 	req->write_size = size;
 	req->desc = desc;
+	req->is_rdma_write = 1;
 
 	/* Post recv for CTS message containing the MR key */
 	rc = fi_trecv(sComm->local_ep, &req->mr_key, sizeof(uint64_t), /* Assuming !FI_MR_LOCAL */ NULL,
@@ -3006,6 +3025,7 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 #if 1
 		/* RDMA Write Protocol */
 
+		req->is_rdma_write = 1;
 		req->mr_key = fi_mr_key(mr_handles[recv_n]->fi_handle);
 		req->msg_id = rComm->next_id;
 		rComm->next_id = (rComm->next_id + 1) % MAX_PENDING_MSG;
