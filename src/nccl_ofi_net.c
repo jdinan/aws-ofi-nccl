@@ -1323,7 +1323,7 @@ static inline ncclResult_t process_completions(
 		if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & CTS_TAG(req->sComm)) == CTS_TAG(req->sComm))) {
 			// RDMA Write Protocol: CTS message received
 
-			DEBUG("Recv CTS (tag = 0x%lx, CTS_TAG = 0x%lx)\n", cq_entry[comp_idx].tag, CTS_TAG(req->sComm));
+			DEBUG("Recv CTS (tag = 0x%lx)\n", cq_entry[comp_idx].tag);
 
                         // Capture the tag that should be echoed back on the ACK
 			req->msg_id = (cq_entry[comp_idx].tag >> MSG_ID_SHIFT) & MSG_ID_MASK;
@@ -1353,7 +1353,7 @@ static inline ncclResult_t process_completions(
 		else if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & ACK_TAG(req->rComm)) == ACK_TAG(req->rComm))) {
 			// RDMA Write Protocol: ACK message received, user iRecv is completed
                         // Update the request using the write_size received in the ACK
-			DEBUG("Recv ACK (tag = 0x%lx, ACK_TAG = 0x%lx)\n", cq_entry[comp_idx].tag, ACK_TAG(req->rComm));
+			DEBUG("Recv ACK (tag = 0x%lx)\n", cq_entry[comp_idx].tag);
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
@@ -1366,7 +1366,7 @@ static inline ncclResult_t process_completions(
 			// RDMA Write Procotol: Write completed, send ACK to receiver
                         //   ACK payload contains the the size of the data transfer
                         //   Echo back the tag that was used on the CTS message
-			DEBUG("Send ACK (tag = 0x%lx)\n", req->sComm->tag | ACK_TAG(req->sComm) | req->msg_id);
+			DEBUG("Send ACK (tag = 0x%lx)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag);
 			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
 					NULL, req->sComm->remote_ep,
 					ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, &req->ctx);
@@ -1385,7 +1385,7 @@ static inline ncclResult_t process_completions(
 			}
 		}
 		else {
-			DEBUG("---- --- (flags = 0x%lx, tag = 0x%lx)\n", comp_flags, cq_entry[comp_idx].tag);
+			DEBUG("---- --- (tag = 0x%lx, flags = 0x%lx)\n", cq_entry[comp_idx].tag, comp_flags);
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, cq_entry[comp_idx].len);
 
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
@@ -3010,7 +3010,7 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 		req->msg_id = rComm->next_id;
 		rComm->next_id = (rComm->next_id + 1) % MAX_PENDING_MSG;
 
-		DEBUG("Send CTS (tag = 0x%lx, recv_n = %d)\n", rComm->tag | CTS_TAG(rComm) | req->msg_id, recv_n);
+		DEBUG("Send CTS (tag = 0x%lx)\n", CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag);
 
 		/* Post send for CTS message containing the MR key */
 		rc = fi_tsend(rComm->local_ep, &req->mr_key, sizeof(uint64_t), NULL,
