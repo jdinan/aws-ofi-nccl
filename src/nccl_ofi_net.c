@@ -1324,15 +1324,37 @@ static inline ncclResult_t process_completions(
 		if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & CTS_TAG(req->sComm)) == CTS_TAG(req->sComm))) {
 			// RDMA Write Protocol: CTS message received
 
-			DEBUG("Recv CTS (tag = 0x%lx)\n", cq_entry[comp_idx].tag);
+			DEBUG("Recv CTS (tag = 0x%lx, key = %lu)\n", cq_entry[comp_idx].tag, req->mr_key);
 
                         // Capture the tag that should be echoed back on the ACK
 			req->msg_id = (cq_entry[comp_idx].tag >> MSG_ID_SHIFT) & MSG_ID_MASK;
 
+			struct fi_msg_rma msg;
+			struct iovec src_buf;
+			struct fi_rma_iov dst_buf;
+
+			src_buf.iov_base = (void*)req->data;
+			src_buf.iov_len  = req->write_size;
+
+			dst_buf.addr = 0; /* Assuing !FI_MR_VIRT_ADDR */
+			dst_buf.len  = req->write_size;
+			dst_buf.key  = req->mr_key;
+
+			msg.msg_iov   = &src_buf;
+			msg.desc      = &req->desc;
+			msg.iov_count = 1;
+			msg.addr      = req->sComm->remote_ep;
+			msg.rma_iov   = &dst_buf;
+			msg.rma_iov_count = 1;
+			msg.context   = &req->ctx;
+			msg.data      = 0;
+
+			int rc = fi_writemsg(req->sComm->local_ep, &msg, FI_DELIVERY_COMPLETE);
+
                         // Send data payload using the MR key received in the CTS message
-			int rc = fi_write(req->sComm->local_ep, req->data, req->write_size, req->desc,
-					req->sComm->remote_ep,
-					/* Assuming !FI_MR_VIRT_ADDR */ 0, req->mr_key, &req->ctx);
+			//int rc = fi_write(req->sComm->local_ep, req->data, req->write_size, req->desc,
+			//		req->sComm->remote_ep,
+			//		/* Assuming !FI_MR_VIRT_ADDR */ 0, req->mr_key, &req->ctx);
 			if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 				// FIXME: Need a better way to handle EAGAIN
 				NCCL_OFI_WARN("Could not issue fi_write request for device %d. RC: %zd",
@@ -1346,6 +1368,9 @@ static inline ncclResult_t process_completions(
 				ret = ncclSystemError;
 				goto error;
 			}
+                        else {
+                            DEBUG("Write    (tag = 0x%lx, buf = %p, size = %lu, key = %lu, desc = %p)\n", cq_entry[comp_idx].tag, req->data, req->write_size, req->mr_key, req->desc);
+                        }
 		}
 		else if (comp_flags & FI_SEND && req->is_rdma_write && req->direction == NCCL_OFI_RECV) {
 			// RDMA Write Protocol: CTS message was sent
@@ -1371,7 +1396,7 @@ static inline ncclResult_t process_completions(
 			// RDMA Write Procotol: Write completed, send ACK to receiver
 			//   ACK payload contains the the size of the data transfer
 			//   Echo back the tag that was used on the CTS message
-			DEBUG("Send ACK (tag = 0x%lx)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag);
+			DEBUG("Send ACK (tag = 0x%lx, len = %lu)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, cq_entry[comp_idx].len);
 			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
 					NULL, req->sComm->remote_ep,
 					ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, &req->ctx);
@@ -3030,7 +3055,13 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 		req->msg_id = rComm->next_id;
 		rComm->next_id = (rComm->next_id + 1) % MAX_PENDING_MSG;
 
-		DEBUG("Send CTS (tag = 0x%lx)\n", CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag);
+		if (OFI_UNLIKELY(req->mr_key == FI_KEY_NOTAVAIL)) {
+			ret = ncclSystemError;
+			NCCL_OFI_WARN("Error retrieving MR key");
+			goto error;
+		}
+
+		DEBUG("Send CTS (tag = 0x%lx, key = %lu)\n", CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, req->mr_key);
 
 		/* Post send for CTS message containing the MR key */
 		rc = fi_tsend(rComm->local_ep, &req->mr_key, sizeof(uint64_t), NULL,
