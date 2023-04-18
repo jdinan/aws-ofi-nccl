@@ -1369,7 +1369,7 @@ static inline ncclResult_t process_completions(
 			DEBUG("Send ACK (tag = 0x%lx)\n", req->sComm->tag | ACK_TAG(req->sComm) | req->msg_id);
 			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
 					NULL, req->sComm->remote_ep,
-					ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT), &req->ctx);
+					ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, &req->ctx);
 			if (rc == -FI_EAGAIN) {
 				// FIXME: Need a better way to handle EAGAIN
 				NCCL_OFI_WARN("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
@@ -2878,7 +2878,7 @@ ncclResult_t nccl_net_ofi_isend(void *sendComm, void* data, int size,
 
 	/* Post recv for CTS message containing the MR key */
 	rc = fi_trecv(sComm->local_ep, &req->mr_key, sizeof(uint64_t), /* Assuming !FI_MR_LOCAL */ NULL,
-		      sComm->remote_ep, CTS_TAG(sComm), MSG_ID_IGNORE, &req->ctx);
+		      sComm->remote_ep, CTS_TAG(sComm) | sComm->tag, MSG_ID_IGNORE, &req->ctx);
 	if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 		// FIXME: Can we return NULL here rather than raising an error?
 		NCCL_OFI_WARN("Could not issue CTS recv request for device %d. RC: %zd",
@@ -3014,7 +3014,7 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 
 		/* Post send for CTS message containing the MR key */
 		rc = fi_tsend(rComm->local_ep, &req->mr_key, sizeof(uint64_t), NULL,
-				rComm->remote_ep, CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT), &req->ctx);
+				rComm->remote_ep, CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, &req->ctx);
 		if (rc == -FI_EAGAIN) {
 			NCCL_OFI_WARN("Unable to post CTS send for dev %d. RC: %zd, ERROR: %s",
 					rComm->dev, rc, fi_strerror(-rc));
@@ -3030,7 +3030,7 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 
 		/* Post ACK recv operation */
 		rc = fi_trecv(rComm->local_ep, &req->write_size, sizeof(uint64_t), NULL,
-				rComm->remote_ep, ACK_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT), 0, &req->ctx);
+				rComm->remote_ep, ACK_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, 0, &req->ctx);
 		if (rc == -FI_EAGAIN) {
 			NCCL_OFI_WARN("Unable to post ACK receive for dev %d. RC: %zd, ERROR: %s",
 					rComm->dev, rc, fi_strerror(-rc));
