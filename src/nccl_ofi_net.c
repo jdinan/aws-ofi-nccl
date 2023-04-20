@@ -1381,7 +1381,7 @@ static inline ncclResult_t process_completions(
 		else if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & ACK_TAG(req->rComm)) == ACK_TAG(req->rComm))) {
 			// RDMA Write Protocol: ACK message received, user iRecv is completed
 			// Update the request using the write_size received in the ACK
-			DEBUG("Recv ACK (tag = 0x%lx)\n", cq_entry[comp_idx].tag);
+			DEBUG("Recv ACK (tag = 0x%lx, size = %lu)\n", cq_entry[comp_idx].tag, req->write_size);
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
