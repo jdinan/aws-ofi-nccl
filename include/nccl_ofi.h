@@ -242,6 +242,7 @@ typedef struct nccl_ofi_req {
 
 	/* RDMA Write support */
 	uint64_t mr_key;
+	uint64_t offset;
 	uint64_t msg_id;
 
 	const void *data;

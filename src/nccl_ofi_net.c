@@ -30,7 +30,7 @@
 #endif
 
 #define DEBUG(...)
-//#define DEBUG(...) printf(__VA_ARGS__)
+//#define DEBUG(...) do { printf(__VA_ARGS__); fflush(NULL); } while (0)
 
 #define MAX_PENDING_MSG ((1 << 16) - 1)
 #define MSG_ID_MASK     ((1 << 16) - 1)
@@ -41,6 +41,39 @@
 #define ACK_BIT  (1ul << 45)
 #define CTS_TAG(comm) (CTRL_BIT | CTS_BIT)
 #define ACK_TAG(comm) (CTRL_BIT | ACK_BIT)
+
+static void debug_print_buf(nccl_ofi_req_t *req) {
+	nccl_ofi_hcopy_buf_handle_t *hdl = nccl_ofi_get_hcopy_buffer_handle((void*)req->data, req->write_size);
+
+	if (hdl) {
+		int dest[4];
+		ptrdiff_t offset = (uint64_t)req->data - hdl->info.va;
+		int ret = gdr_copy_from_mapping(hdl->mhandle, dest,
+						(char *)hdl->base_ptr + offset, sizeof(int)*4);
+		if (ret) {
+			NCCL_OFI_WARN("debug_print_buf: Error in gdr_copy_from_mapping (%d)", ret);
+			return;
+		}
+		for (int i = 0; i < 4; i++)
+			printf("%s[%d] = %d\n", (req->direction == NCCL_OFI_SEND) ? "send" : "recv", i, dest[i]);
+	}
+}
+
+static void debug_set_buf(nccl_ofi_req_t *req) {
+	nccl_ofi_hcopy_buf_handle_t *hdl = nccl_ofi_get_hcopy_buffer_handle((void*)req->data, req->write_size);
+
+	if (hdl) {
+		int src[4];
+		for (int i = 0; i < 4; i++) src[i] = 4-i;
+
+		int ret = gdr_copy_to_mapping(hdl->mhandle,
+					      (char *)hdl->base_ptr, src, sizeof(int)*4);
+		if (ret) {
+			NCCL_OFI_WARN("debug_set_buf: Error in gdr_copy_from_mapping (%d)", ret);
+			return;
+		}
+	}
+}
 
 /* NICs info list for a provider */
 struct fi_info* ofi_info_list = NULL;
@@ -56,7 +89,7 @@ int ofi_ndevices = -1;
  */
 __thread nccl_ofi_t **nccl_ofi_component = NULL;
 /* Indicates if memory registration of local buffers is required */
-bool local_mr = false;
+bool local_mr = true; // FIXME: Debugging Tree algo
 /* Indicates if remote virtual addressing is used */
 bool virt_addr_mr = false;
 /* Indicates if memory registration of device buffers is required */
@@ -335,6 +368,7 @@ static inline void zero_nccl_ofi_req(nccl_ofi_req_t *req)
 	req->direction = -1;
 
 	req->mr_key = 0;
+	req->offset = 0;
 	req->msg_id = 0;
 	req->data = NULL;
 	req->write_size = 0;
@@ -623,7 +657,8 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 	/* Initialize MR attributes */
 	mr_attr.mr_iov = &iov;
 	mr_attr.iov_count = 1;
-	mr_attr.access = FI_SEND | FI_RECV | FI_WRITE;
+	mr_attr.access = FI_SEND | FI_RECV;
+	mr_attr.access |= FI_REMOTE_READ | FI_REMOTE_WRITE; // FIXME
 
 	switch (type) {
 	case NCCL_PTR_HOST:
@@ -708,7 +743,7 @@ exit:
 static void get_hints(struct fi_info *hints, int request_gdr)
 {
 	if (request_gdr) {
-		hints->caps = FI_TAGGED | FI_MSG | FI_HMEM | FI_REMOTE_COMM | FI_RMA | FI_WRITE;
+		hints->caps = FI_TAGGED | FI_MSG | FI_HMEM | FI_REMOTE_COMM | FI_RMA | FI_REMOTE_WRITE | FI_WRITE;
 		if (!cuda_flush)
 			hints->caps |= FI_RMA | FI_READ;
 		/*
@@ -1324,9 +1359,9 @@ static inline ncclResult_t process_completions(
 		if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & CTS_TAG(req->sComm)) == CTS_TAG(req->sComm))) {
 			// RDMA Write Protocol: CTS message received
 
-			DEBUG("Recv CTS (tag = 0x%lx, key = %lu)\n", cq_entry[comp_idx].tag, req->mr_key);
+			DEBUG("Recv CTS (tag = 0x%lx, key = %lu, offset=%lu)\n", cq_entry[comp_idx].tag, req->mr_key, req->offset);
 
-                        // Capture the tag that should be echoed back on the ACK
+			// Capture the tag that should be echoed back on the ACK
 			req->msg_id = (cq_entry[comp_idx].tag >> MSG_ID_SHIFT) & MSG_ID_MASK;
 
 			struct fi_msg_rma msg;
@@ -1336,7 +1371,7 @@ static inline ncclResult_t process_completions(
 			src_buf.iov_base = (void*)req->data;
 			src_buf.iov_len  = req->write_size;
 
-			dst_buf.addr = 0; /* Assuing !FI_MR_VIRT_ADDR */
+			dst_buf.addr = req->offset; /* Assuing !FI_MR_VIRT_ADDR */
 			dst_buf.len  = req->write_size;
 			dst_buf.key  = req->mr_key;
 
@@ -1349,9 +1384,9 @@ static inline ncclResult_t process_completions(
 			msg.context   = &req->ctx;
 			msg.data      = 0;
 
-			int rc = fi_writemsg(req->sComm->local_ep, &msg, FI_DELIVERY_COMPLETE);
+			int rc = fi_writemsg(req->sComm->local_ep, &msg, 0);//FI_DELIVERY_COMPLETE);
 
-                        // Send data payload using the MR key received in the CTS message
+			// Send data payload using the MR key received in the CTS message
 			//int rc = fi_write(req->sComm->local_ep, req->data, req->write_size, req->desc,
 			//		req->sComm->remote_ep,
 			//		/* Assuming !FI_MR_VIRT_ADDR */ 0, req->mr_key, &req->ctx);
@@ -1368,9 +1403,10 @@ static inline ncclResult_t process_completions(
 				ret = ncclSystemError;
 				goto error;
 			}
-                        else {
-                            DEBUG("Write    (tag = 0x%lx, buf = %p, size = %lu, key = %lu, desc = %p)\n", cq_entry[comp_idx].tag, req->data, req->write_size, req->mr_key, req->desc);
-                        }
+			else {
+				DEBUG("Write    (tag = 0x%lx, buf = %p, offset = %lu size = %lu, key = %lu, desc = %p)\n",
+				      cq_entry[comp_idx].tag, req->data, req->offset, req->write_size, req->mr_key, req->desc);
+			}
 		}
 		else if (comp_flags & FI_SEND && req->is_rdma_write && req->direction == NCCL_OFI_RECV) {
 			// RDMA Write Protocol: CTS message was sent
@@ -1396,7 +1432,8 @@ static inline ncclResult_t process_completions(
 			// RDMA Write Procotol: Write completed, send ACK to receiver
 			//   ACK payload contains the the size of the data transfer
 			//   Echo back the tag that was used on the CTS message
-			DEBUG("Send ACK (tag = 0x%lx, len = %lu)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, cq_entry[comp_idx].len);
+			DEBUG("Send ACK (tag = 0x%lx, size = %lu)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, req->write_size);
+			// FIXME: Replace with fi_tsendmsg with FI_FENCE flag
 			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
 					NULL, req->sComm->remote_ep,
 					ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, &req->ctx);
@@ -1627,6 +1664,10 @@ ncclResult_t nccl_net_ofi_init(ncclDebugLogger_t logFunction)
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Provider %s only configured for local registration.",
 			       ofi_info_list->fabric_attr->prov_name);
 		prov_key_mr = true;
+
+		// FIXME: Require remote write support
+		ret = ncclSystemError;
+		goto exit;
 	} else if (ofi_info_list->domain_attr->mr_mode & FI_MR_PROV_KEY) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Provider %s selects memory registration keys",
 			       ofi_info_list->fabric_attr->prov_name);
@@ -2921,7 +2962,7 @@ ncclResult_t nccl_net_ofi_isend(void *sendComm, void* data, int size,
 	req->is_rdma_write = 1;
 
 	/* Post recv for CTS message containing the MR key */
-	rc = fi_trecv(sComm->local_ep, &req->mr_key, sizeof(uint64_t), /* Assuming !FI_MR_LOCAL */ NULL,
+	rc = fi_trecv(sComm->local_ep, &req->mr_key, 2*sizeof(uint64_t), /* Assuming !FI_MR_LOCAL */ NULL,
 		      sComm->remote_ep, CTS_TAG(sComm) | sComm->tag, MSG_ID_IGNORE, &req->ctx);
 	if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 		// FIXME: Can we return NULL here rather than raising an error?
@@ -3034,11 +3075,13 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 	assert(n <= NCCL_OFI_MAX_RECVS);
 	for (int recv_n = 0; recv_n < n; recv_n++) {
 		nccl_ofi_mr_handle_t **mr_handles = (nccl_ofi_mr_handle_t**) mhandles;
+#if 0
 		void *desc = NULL;
 
 		if (mr_handles[recv_n] && mr_handles[recv_n]->fi_handle != NULL) {
 			desc = fi_mr_desc(mr_handles[recv_n]->fi_handle);
 		}
+#endif
 
         NCCL_OFI_TRACE_RECV(rComm->dev, rComm->tag, sizes[recv_n], req, request, &req->ctx);
 
@@ -3050,8 +3093,10 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 #if 1
 		/* RDMA Write Protocol */
 
+		req->data = buffers[recv_n];
 		req->is_rdma_write = 1;
 		req->mr_key = fi_mr_key(mr_handles[recv_n]->fi_handle);
+		req->offset = (uint64_t)((char*)req->data - (char*)(mr_handles[recv_n])->addr);
 		req->msg_id = rComm->next_id;
 		rComm->next_id = (rComm->next_id + 1) % MAX_PENDING_MSG;
 
@@ -3064,7 +3109,7 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 		DEBUG("Send CTS (tag = 0x%lx, key = %lu)\n", CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, req->mr_key);
 
 		/* Post send for CTS message containing the MR key */
-		rc = fi_tsend(rComm->local_ep, &req->mr_key, sizeof(uint64_t), NULL,
+		rc = fi_tsend(rComm->local_ep, &req->mr_key, 2*sizeof(uint64_t), NULL,
 				rComm->remote_ep, CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, &req->ctx);
 		if (rc == -FI_EAGAIN) {
 			NCCL_OFI_WARN("Unable to post CTS send for dev %d. RC: %zd, ERROR: %s",
