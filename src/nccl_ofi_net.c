@@ -29,8 +29,10 @@
 #include <gdrapi.h>
 #endif
 
-#define DEBUG(...)
-//#define DEBUG(...) do { printf(__VA_ARGS__); fflush(NULL); } while (0)
+//#define DEBUG(...)
+#ifndef DEBUG
+#define DEBUG(...) do { printf(__VA_ARGS__); fflush(NULL); } while (0)
+#endif
 
 #define MAX_PENDING_MSG ((1 << 16) - 1)
 #define MSG_ID_MASK     ((1 << 16) - 1)
@@ -39,8 +41,6 @@
 #define CTRL_BIT (1ul << 47)
 #define CTS_BIT  (1ul << 46)
 #define ACK_BIT  (1ul << 45)
-#define CTS_TAG(comm) (CTRL_BIT | CTS_BIT)
-#define ACK_TAG(comm) (CTRL_BIT | ACK_BIT)
 
 static void debug_print_buf(nccl_ofi_req_t *req) {
 	nccl_ofi_hcopy_buf_handle_t *hdl = nccl_ofi_get_hcopy_buffer_handle((void*)req->data, req->write_size);
@@ -89,7 +89,7 @@ int ofi_ndevices = -1;
  */
 __thread nccl_ofi_t **nccl_ofi_component = NULL;
 /* Indicates if memory registration of local buffers is required */
-bool local_mr = true; // FIXME: Debugging Tree algo
+bool local_mr = false;
 /* Indicates if remote virtual addressing is used */
 bool virt_addr_mr = false;
 /* Indicates if memory registration of device buffers is required */
@@ -1356,10 +1356,11 @@ static inline ncclResult_t process_completions(
 
 		req = container_of(op_ctx, nccl_ofi_req_t, ctx);
 
-		if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & CTS_TAG(req->sComm)) == CTS_TAG(req->sComm))) {
+		if (comp_flags & FI_RECV && cq_entry[comp_idx].tag & CTS_BIT) {
 			// RDMA Write Protocol: CTS message received
 
-			DEBUG("Recv CTS (tag = 0x%lx, key = %lu, offset=%lu)\n", cq_entry[comp_idx].tag, req->mr_key, req->offset);
+			DEBUG("Recv CTS (tag = 0x%lx, key = %lu, offset = %lu, req = %p)\n",
+			      cq_entry[comp_idx].tag, req->mr_key, req->offset, req);
 
 			// Capture the tag that should be echoed back on the ACK
 			req->msg_id = (cq_entry[comp_idx].tag >> MSG_ID_SHIFT) & MSG_ID_MASK;
@@ -1389,7 +1390,7 @@ static inline ncclResult_t process_completions(
 			// Send data payload using the MR key received in the CTS message
 			//int rc = fi_write(req->sComm->local_ep, req->data, req->write_size, req->desc,
 			//		req->sComm->remote_ep,
-			//		/* Assuming !FI_MR_VIRT_ADDR */ 0, req->mr_key, &req->ctx);
+			//		/* Assuming !FI_MR_VIRT_ADDR */ req->offset, req->mr_key, &req->ctx);
 			if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 				// FIXME: Need a better way to handle EAGAIN
 				NCCL_OFI_WARN("Could not issue fi_write request for device %d. RC: %zd",
@@ -1404,27 +1405,29 @@ static inline ncclResult_t process_completions(
 				goto error;
 			}
 			else {
-				DEBUG("Write    (tag = 0x%lx, buf = %p, offset = %lu size = %lu, key = %lu, desc = %p)\n",
-				      cq_entry[comp_idx].tag, req->data, req->offset, req->write_size, req->mr_key, req->desc);
+				DEBUG("Write    (tag = 0x%lx, key = %lu, offset = %lu, size = %lu, buf = %p, desc = %p)\n",
+				      cq_entry[comp_idx].tag, req->mr_key, req->offset, req->write_size, req->data, req->desc);
 			}
 		}
 		else if (comp_flags & FI_SEND && req->is_rdma_write && req->direction == NCCL_OFI_RECV) {
 			// RDMA Write Protocol: CTS message was sent
 			// Continue waiting for the ACK recv to complete
 			// Note tag is not returned on a send completion
-			DEBUG("Fin  CTS (tag = 0x%lx)\n", CTS_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->rComm->tag);
+			DEBUG("Fin  CTS (tag = 0x%lx)\n", CTS_BIT | (req->msg_id << MSG_ID_SHIFT) | req->rComm->tag);
 		}
-		else if (comp_flags & FI_RECV && ((cq_entry[comp_idx].tag & ACK_TAG(req->rComm)) == ACK_TAG(req->rComm))) {
+		else if (comp_flags & FI_RECV && cq_entry[comp_idx].tag & ACK_BIT) {
 			// RDMA Write Protocol: ACK message received, user iRecv is completed
 			// Update the request using the write_size received in the ACK
-			DEBUG("Recv ACK (tag = 0x%lx, size = %lu)\n", cq_entry[comp_idx].tag, req->write_size);
+			DEBUG("Recv ACK (tag = 0x%lx, key = %lu, offset = %lu, size = %lu)\n",
+			      cq_entry[comp_idx].tag, req->mr_key, req->offset, req->write_size);
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
 		else if (comp_flags & FI_SEND && req->is_rdma_write && req->direction == NCCL_OFI_SEND) {
 			// RDMA Write Protocol: ACK message sent, user iSend is completed
 			// Note tag is not returned on a send completion
-			DEBUG("Fin  ACK (tag = 0x%lx)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag);
+			DEBUG("Fin  ACK (tag = 0x%lx, key = %lu, offset = %lu, size = %lu)\n",
+			      ACK_BIT | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, req->mr_key, req->offset, req->write_size);
 			update_nccl_ofi_req(req, NCCL_OFI_REQ_COMPLETED, req->write_size);
 			NCCL_OFI_TRACE_COMPLETIONS(req, &req->ctx);
 		}
@@ -1432,20 +1435,22 @@ static inline ncclResult_t process_completions(
 			// RDMA Write Procotol: Write completed, send ACK to receiver
 			//   ACK payload contains the the size of the data transfer
 			//   Echo back the tag that was used on the CTS message
-			DEBUG("Send ACK (tag = 0x%lx, size = %lu)\n", ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, req->write_size);
+			if (!(req->is_rdma_write && req->direction == NCCL_OFI_SEND)) abort();
+			DEBUG("Send ACK (tag = 0x%lx, key = %lu, offset = %lu, size = %lu)\n",
+			      ACK_BIT | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, req->mr_key, req->offset, req->write_size);
 			// FIXME: Replace with fi_tsendmsg with FI_FENCE flag
 			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
 					NULL, req->sComm->remote_ep,
-					ACK_TAG(req->sComm) | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, &req->ctx);
+					ACK_BIT | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, &req->ctx);
 			if (rc == -FI_EAGAIN) {
 				// FIXME: Need a better way to handle EAGAIN
-				NCCL_OFI_WARN("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
+				printf("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
 						req->sComm->dev, rc, fi_strerror(-rc));
 				ret = ncclSystemError;
 				goto error;
 			}
 			else if (rc != 0) {
-				NCCL_OFI_WARN("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
+				printf("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
 						req->sComm->dev, rc, fi_strerror(-rc));
 				ret = ncclSystemError;
 				goto error;
@@ -2963,7 +2968,7 @@ ncclResult_t nccl_net_ofi_isend(void *sendComm, void* data, int size,
 
 	/* Post recv for CTS message containing the MR key */
 	rc = fi_trecv(sComm->local_ep, &req->mr_key, 2*sizeof(uint64_t), /* Assuming !FI_MR_LOCAL */ NULL,
-		      sComm->remote_ep, CTS_TAG(sComm) | sComm->tag, MSG_ID_IGNORE, &req->ctx);
+		      sComm->remote_ep, CTS_BIT | sComm->tag, MSG_ID_IGNORE, &req->ctx);
 	if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 		// FIXME: Can we return NULL here rather than raising an error?
 		NCCL_OFI_WARN("Could not issue CTS recv request for device %d. RC: %zd",
@@ -3106,11 +3111,12 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 			goto error;
 		}
 
-		DEBUG("Send CTS (tag = 0x%lx, key = %lu)\n", CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, req->mr_key);
+		DEBUG("Send CTS (tag = 0x%lx, key = %lu, offset = %lu, req = %p)\n",
+		      CTS_BIT | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, req->mr_key, req->offset, req);
 
 		/* Post send for CTS message containing the MR key */
 		rc = fi_tsend(rComm->local_ep, &req->mr_key, 2*sizeof(uint64_t), NULL,
-				rComm->remote_ep, CTS_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, &req->ctx);
+				rComm->remote_ep, CTS_BIT | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, &req->ctx);
 		if (rc == -FI_EAGAIN) {
 			NCCL_OFI_WARN("Unable to post CTS send for dev %d. RC: %zd, ERROR: %s",
 					rComm->dev, rc, fi_strerror(-rc));
@@ -3126,7 +3132,7 @@ ncclResult_t nccl_net_ofi_irecv(void* recvComm, int n, void** buffers, int* size
 
 		/* Post ACK recv operation */
 		rc = fi_trecv(rComm->local_ep, &req->write_size, sizeof(uint64_t), NULL,
-				rComm->remote_ep, ACK_TAG(rComm) | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, 0, &req->ctx);
+				rComm->remote_ep, ACK_BIT | (req->msg_id << MSG_ID_SHIFT) | rComm->tag, 0, &req->ctx);
 		if (rc == -FI_EAGAIN) {
 			NCCL_OFI_WARN("Unable to post ACK receive for dev %d. RC: %zd, ERROR: %s",
 					rComm->dev, rc, fi_strerror(-rc));
