@@ -29,7 +29,7 @@
 #include <gdrapi.h>
 #endif
 
-//#define DEBUG(...)
+#define DEBUG(...)
 #ifndef DEBUG
 #define DEBUG(...) do { printf(__VA_ARGS__); fflush(NULL); } while (0)
 #endif
@@ -743,7 +743,7 @@ exit:
 static void get_hints(struct fi_info *hints, int request_gdr)
 {
 	if (request_gdr) {
-		hints->caps = FI_TAGGED | FI_MSG | FI_HMEM | FI_REMOTE_COMM | FI_RMA | FI_REMOTE_WRITE | FI_WRITE;
+		hints->caps = FI_TAGGED | FI_MSG | FI_HMEM | FI_REMOTE_COMM | FI_RMA | FI_REMOTE_WRITE | FI_WRITE | FI_FENCE;
 		if (!cuda_flush)
 			hints->caps |= FI_RMA | FI_READ;
 		/*
@@ -1435,22 +1435,36 @@ static inline ncclResult_t process_completions(
 			// RDMA Write Procotol: Write completed, send ACK to receiver
 			//   ACK payload contains the the size of the data transfer
 			//   Echo back the tag that was used on the CTS message
-			if (!(req->is_rdma_write && req->direction == NCCL_OFI_SEND)) abort();
+
 			DEBUG("Send ACK (tag = 0x%lx, key = %lu, offset = %lu, size = %lu)\n",
 			      ACK_BIT | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, req->mr_key, req->offset, req->write_size);
-			// FIXME: Replace with fi_tsendmsg with FI_FENCE flag
-			int rc = fi_tsend(req->sComm->local_ep, &req->write_size, sizeof(uint64_t),
-					NULL, req->sComm->remote_ep,
-					ACK_BIT | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag, &req->ctx);
+
+			struct fi_msg_tagged msg;
+			struct iovec src_buf;
+
+			src_buf.iov_base = &req->write_size;
+			src_buf.iov_len  = sizeof(uint64_t);
+
+			msg.msg_iov   = &src_buf;
+			msg.desc      = NULL;
+			msg.iov_count = 1;
+			msg.addr      = req->sComm->remote_ep;
+			msg.tag       = ACK_BIT | (req->msg_id << MSG_ID_SHIFT) | req->sComm->tag;
+			msg.ignore    = 0;
+			msg.context   = &req->ctx;
+			msg.data      = 0;
+
+			int rc = fi_tsendmsg(req->sComm->local_ep, &msg, FI_FENCE);
+
 			if (rc == -FI_EAGAIN) {
 				// FIXME: Need a better way to handle EAGAIN
-				printf("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
+				NCCL_OFI_WARN("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
 						req->sComm->dev, rc, fi_strerror(-rc));
 				ret = ncclSystemError;
 				goto error;
 			}
 			else if (rc != 0) {
-				printf("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
+				NCCL_OFI_WARN("Unable to post ACK send for dev %d. RC: %zd, ERROR: %s",
 						req->sComm->dev, rc, fi_strerror(-rc));
 				ret = ncclSystemError;
 				goto error;
